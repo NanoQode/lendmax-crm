@@ -37,6 +37,7 @@ import { withTransaction } from '../db/pool.ts';
 import { log } from '../lib/logger.ts';
 import { toE164 } from '../lib/phone.ts';
 import { recordAudit } from './audit.ts';
+import { applyAssignmentRules } from './assignment.ts';
 
 // ── The payload, as the portal actually sends it ───────────────────────────
 
@@ -728,6 +729,16 @@ export async function importMirrorPayload(
       );
       applicationId = rows[0]!.id;
       created = true;
+
+      // A new file gets an owner here, in the same transaction. Without it
+      // nobody is notified when the client uploads, it shows on no priority
+      // list, and no staleness rule watches it.
+      await applyAssignmentRules(client, organizationId, {
+        applicationId,
+        province: fields.property_province,
+        transactionType,
+        purpose: fields.purpose,
+      });
     } else {
       applicationId = existing.id;
       const update: Record<string, unknown> = { ...owned };

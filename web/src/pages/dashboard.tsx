@@ -33,6 +33,7 @@ const KPIS: Array<{ key: string; label: string; format?: 'money' }> = [
   { key: 'documents_outstanding', label: 'Docs outstanding' },
   { key: 'tasks_overdue', label: 'Tasks overdue' },
   { key: 'renewals_180', label: 'Renewals in 180d' },
+  { key: 'unassigned', label: 'Unassigned' },
 ];
 
 export function DashboardPage({ session }: { session: Session }) {

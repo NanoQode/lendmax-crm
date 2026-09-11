@@ -129,7 +129,12 @@ dashboardRoutes.get(
         COUNT(*) FILTER (WHERE c.awaiting_reply_since IS NOT NULL)::int AS awaiting_reply,
         COUNT(*) FILTER (WHERE app.documents_outstanding > 0)::int AS documents_outstanding,
         COUNT(*) FILTER (WHERE app.scarlett_sync_state = 'error')::int AS scarlett_errors,
-        COUNT(*) FILTER (WHERE app.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 180)::int AS renewals_180
+        COUNT(*) FILTER (WHERE app.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 180)::int AS renewals_180,
+        -- A file with no owner is a file nobody is watching, and the portal
+        -- delivers them at 2am.
+        COUNT(*) FILTER (WHERE NOT EXISTS (
+          SELECT 1 FROM assignments asg
+           WHERE asg.application_id = app.id AND asg.unassigned_at IS NULL))::int AS unassigned
         FROM applications app
         JOIN customers c ON c.id = app.customer_id
         LEFT JOIN pipeline_stages ps

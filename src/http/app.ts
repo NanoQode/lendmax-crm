@@ -24,6 +24,8 @@ import { workRoutes } from './routes/work.ts';
 import { systemRoutes } from './routes/system.ts';
 import { internalRoutes } from './routes/internal.ts';
 import { integrationRoutes } from './routes/integrations.ts';
+import { documentRoutes } from './routes/documents.ts';
+import { publicRoutes } from './routes/public.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = path.resolve(here, '../../web/public');
@@ -130,10 +132,19 @@ export function createApp(): Express {
   api.use('/', customerRoutes);
   api.use('/', workRoutes);
   api.use('/', integrationRoutes);
+  api.use('/', documentRoutes);
 
   api.use((_req, res) => {
     res.status(404).json({ ok: false, code: 'not_found', error: 'No such endpoint.' });
   });
+
+  // The client-facing upload link, mounted BEFORE the authenticated API.
+  //
+  // Order matters and is easy to get wrong: `api` attaches router-level auth
+  // that runs for every request entering it, matched or not, so mounting this
+  // afterwards makes /api/upload/<token> answer "sign in to continue" to a
+  // client who has no account and never will.
+  app.use(base || '/', publicRoutes);
 
   app.use(`${base}/api`, api);
 

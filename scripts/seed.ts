@@ -251,6 +251,20 @@ async function seedVocabularies(orgId: string): Promise<void> {
       );
     }
 
+    // Who a new file belongs to. Seeded as `unassigned` deliberately: a
+    // brokerage should choose how files are routed rather than discover that
+    // the seed chose for them. The dashboard's unassigned count makes the
+    // choice visible until they do.
+    for (const role of ['broker', 'underwriter'] as const) {
+      await c.query(
+        `INSERT INTO assignment_rules (organization_id, role, mode)
+         SELECT $1, $2, 'unassigned'
+          WHERE NOT EXISTS (SELECT 1 FROM assignment_rules
+                             WHERE organization_id = $1 AND role = $2)`,
+        [orgId, role],
+      );
+    }
+
     // Settings carry a source note wherever the value is somebody else's rule
     // rather than the brokerage's own preference.
     const settings: Array<[string, unknown, string | null]> = [
