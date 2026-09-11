@@ -1,0 +1,10 @@
+node_modules/
+dist/
+web/public/assets/
+*.log
+.env
+.env.*
+!.env.example
+storage/
+coverage/
+.DS_Store

@@ -1,0 +1,40 @@
+{
+  "name": "lendmax-crm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lendmax — Canadian mortgage brokerage CRM for lendmax.ca/crm",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build:server": "tsc -p tsconfig.json",
+    "build:web": "node scripts/build-web.mjs",
+    "build": "npm run build:server && npm run build:web",
+    "dev": "node --env-file-if-exists=.env --experimental-strip-types --watch src/server.ts",
+    "start": "node --env-file-if-exists=.env dist/server.js",
+    "migrate": "node --env-file-if-exists=.env --experimental-strip-types src/db/migrate.ts",
+    "seed": "node --env-file-if-exists=.env --experimental-strip-types scripts/seed.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:db": "node --env-file-if-exists=.env.test --experimental-strip-types --test test/db/*.test.ts",
+    "verify": "npm run typecheck && npm test && npm run test:db"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "multer": "^2.0.2",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.9",
+    "@types/express": "^5.0.3",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^22.15.3",
+    "@types/pg": "^8.15.5",
+    "esbuild": "^0.25.10",
+    "preact": "^10.27.2",
+    "typescript": "^5.9.2"
+  }
+}
