@@ -14,7 +14,7 @@ import { env } from './config/env.ts';
 import { log } from './lib/logger.ts';
 import { closePool, healthcheck, query } from './db/pool.ts';
 import { loadMigrations } from './db/migrate.ts';
-import { registerHandlers } from './jobs/handlers/index.ts';
+import { primeRecurringJobs, registerHandlers } from './jobs/handlers/index.ts';
 import { startWorker, stopWorker } from './jobs/worker.ts';
 
 async function assertSchemaIsCurrent(): Promise<void> {
@@ -57,6 +57,10 @@ async function main(): Promise<void> {
   if (workerEnabled) {
     registerHandlers();
     startWorker();
+    // Plant the recurring tick. It reschedules itself thereafter, and its
+    // dedupe key means a restart does not leave two of them running.
+    void primeRecurringJobs().catch((err) =>
+      log.error('could not prime the recurring jobs', { error: err }));
   } else {
     log.warn('the background worker is disabled; scheduled messages will not go out');
   }

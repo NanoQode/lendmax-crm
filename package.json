@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Lendmax — Canadian mortgage brokerage CRM for lendmax.ca/crm",
+  "description": "Lendmax \u2014 Canadian mortgage brokerage CRM for lendmax.ca/crm",
   "engines": {
     "node": ">=22"
   },
@@ -18,7 +18,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "test:db": "node --env-file-if-exists=.env.test --experimental-strip-types --test --test-concurrency=1 test/db/*.test.ts",
-    "verify": "npm run typecheck && npm test && npm run test:db"
+    "verify": "npm run typecheck && npm test && npm run test:db",
+    "seed:automations": "node --env-file-if-exists=.env --experimental-strip-types scripts/seed-automations.ts"
   },
   "dependencies": {
     "@types/nodemailer": "^8.0.1",

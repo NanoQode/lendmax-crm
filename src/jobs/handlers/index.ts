@@ -9,8 +9,13 @@ import { log } from '../../lib/logger.ts';
 import { registerHandler } from '../worker.ts';
 import { deliver } from '../../services/messaging.ts';
 import { pushDeal } from '../../integrations/scarlett.ts';
+import { registerAutomationHandlers } from './automation.ts';
+import { enqueue } from '../queue.ts';
+import { queryOne } from '../../db/pool.ts';
 
 export function registerHandlers(): void {
+  registerAutomationHandlers();
+
   registerHandler('message.send', async (job) => {
     const messageId = String((job.payload as { messageId?: string }).messageId ?? '');
     if (!messageId) throw new Error('message.send needs a messageId.');
@@ -42,4 +47,18 @@ export function registerHandlers(): void {
       });
     }
   });
+}
+
+/**
+ * Start the recurring work.
+ *
+ * The tick reschedules itself, so this only has to plant the first one — and
+ * the dedupe key means a restart does not leave two of them running.
+ */
+export async function primeRecurringJobs(): Promise<void> {
+  const org = await queryOne<{ id: string }>(
+    'SELECT id FROM organizations ORDER BY created_at LIMIT 1',
+  );
+  if (!org) return;
+  await enqueue('automation.tick', {}, { organizationId: org.id, dedupeKey: 'automation.tick' });
 }
