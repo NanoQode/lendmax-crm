@@ -10,6 +10,7 @@ import { Badge, Empty, ErrorNote, Field, Icon, ICONS, Skeleton } from './compone
 import { DashboardPage } from './pages/dashboard.tsx';
 import { CustomersPage, PipelinePage } from './pages/customers.tsx';
 import { ClientPage, NotBuiltYet } from './pages/client.tsx';
+import { IntegrationsPage } from './pages/integrations.tsx';
 
 export function App() {
   const { state, reload, signOut } = useSession();
@@ -60,7 +61,7 @@ function Routes({ session, config, onProfileSaved }: {
     case '/pipeline': return <PipelinePage session={session} />;
     case '/tasks': return <TasksPage session={session} />;
     case '/profile': return <ProfilePage session={session} onSaved={onProfileSaved} />;
-    case '/integrations': return <IntegrationsPage />;
+    case '/integrations': return <IntegrationsPage session={session} />;
     case '/settings': return <SettingsPage session={session} config={config} />;
     case '/documents': return <ModulePage title="Documents" />;
     case '/automations': return <ModulePage title="Automations" />;
@@ -304,78 +305,6 @@ function TasksPage({ session }: { session: Session }) {
 }
 
 // ── Integrations and settings ──────────────────────────────────────────────
-
-function IntegrationsPage() {
-  const state = useAsync<{
-    integrations: Array<{ id: string; name: string; configured: boolean; mode?: string; missing: string[] }>;
-    jobs: Record<string, number>; database: { ok: boolean; latencyMs: number };
-    environment: Record<string, string>;
-  }>('/status');
-
-  return (
-    <div class="content-narrow">
-      <div class="page-head">
-        <div>
-          <h1>Integrations</h1>
-          <p>What is connected, and exactly what is missing where it is not.</p>
-        </div>
-      </div>
-
-      {state.status === 'loading' && <Skeleton rows={4} />}
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
-
-      {state.status === 'ready' && (
-        <div class="stack">
-          <div class="card">
-            <div class="card-head"><h2>Integrations</h2></div>
-            <div class="card-body-flush">
-              {state.data.integrations.map((i) => (
-                <div key={i.id} class="row" style={{ padding: '12px 15px', borderBottom: '1px solid var(--border)' }}>
-                  <div style={{ flex: 1 }}>
-                    <div class="cell-strong">{i.name}</div>
-                    {i.missing.length > 0 && (
-                      <div class="text-sm text-muted">
-                        Missing: <code>{i.missing.join('</code>, <code>')}</code>
-                      </div>
-                    )}
-                    {i.mode && <div class="text-sm text-muted">Mode: {i.mode}</div>}
-                  </div>
-                  <Badge tone={i.configured ? 'ok' : 'warn'}>
-                    {i.configured ? 'Configured' : 'Not configured'}
-                  </Badge>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="card-head"><h2>System</h2></div>
-            <div class="card-body">
-              <div class="row" style={{ gap: 28, flexWrap: 'wrap' }}>
-                <div>
-                  <div class="text-sm text-muted">Database</div>
-                  <div><Badge tone={state.data.database.ok ? 'ok' : 'danger'}>
-                    {state.data.database.ok ? `${state.data.database.latencyMs}ms` : 'Unavailable'}
-                  </Badge></div>
-                </div>
-                <div>
-                  <div class="text-sm text-muted">Jobs dead-lettered</div>
-                  <div class="num">{state.data.jobs.dead ?? 0}</div>
-                </div>
-                {Object.entries(state.data.environment).map(([k, v]) => (
-                  <div key={k}>
-                    <div class="text-sm text-muted">{k.replace(/_/g, ' ')}</div>
-                    <div>{v}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 function SettingsPage({ session, config }: { session: Session; config: Config | null }) {
   const [verifying, setVerifying] = useState(false);
