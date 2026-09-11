@@ -2,7 +2,7 @@
 import { queryOne } from '../../db/pool.ts';
 import { registerHandler } from '../worker.ts';
 import { enqueue } from '../queue.ts';
-import { processEvents, runStep } from '../../services/automation-engine.ts';
+import { processEvents, runStep, sweepDueEnrollments } from '../../services/automation-engine.ts';
 
 export function registerAutomationHandlers(): void {
   registerHandler('automation.step', async (job) => {
@@ -29,6 +29,8 @@ export function registerAutomationHandlers(): void {
     if (!organizationId) return;
 
     await processEvents(organizationId);
+    // And pick up anything whose job went missing.
+    await sweepDueEnrollments(organizationId);
 
     await enqueue('automation.tick', {}, {
       organizationId,

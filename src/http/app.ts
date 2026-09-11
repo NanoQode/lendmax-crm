@@ -23,6 +23,7 @@ import { dashboardRoutes } from './routes/dashboard.ts';
 import { workRoutes } from './routes/work.ts';
 import { systemRoutes } from './routes/system.ts';
 import { internalRoutes } from './routes/internal.ts';
+import { automationRoutes } from './routes/automations.ts';
 import { integrationRoutes } from './routes/integrations.ts';
 import { documentRoutes } from './routes/documents.ts';
 import { publicRoutes } from './routes/public.ts';
@@ -131,6 +132,7 @@ export function createApp(): Express {
   api.use('/', dashboardRoutes);
   api.use('/', customerRoutes);
   api.use('/', workRoutes);
+  api.use('/', automationRoutes);
   api.use('/', integrationRoutes);
   api.use('/', documentRoutes);
 

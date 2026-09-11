@@ -190,6 +190,51 @@ export async function processEvents(organizationId: string, limit = 100): Promis
   return { processed: events.length, enrolled };
 }
 
+/**
+ * Re-queue enrollments whose time has come and whose job is not there.
+ *
+ * Steps are scheduled by enqueueing a job with a run-after time, which is
+ * right until a job is lost — dead-lettered after its retries, or dropped by
+ * a worker that died between claiming and finishing. Without this, that
+ * client sits at step four of a renewal sequence forever and nobody finds
+ * out, because nothing is failing.
+ *
+ * `next_run_at` on the enrollment is the durable record of when the next
+ * step is due; the job queue is only the mechanism. This reconciles the two.
+ * The enqueue is deduped against pending and running jobs, so an enrollment
+ * whose job is fine is not queued twice.
+ */
+export async function sweepDueEnrollments(
+  organizationId: string,
+  limit = 200,
+): Promise<{ requeued: number }> {
+  const { rows } = await query<{ id: string; current_node_key: string | null }>(
+    `SELECT e.id, e.current_node_key
+       FROM automation_enrollments e
+      WHERE e.organization_id = $1 AND e.status = 'active'
+        AND e.next_run_at IS NOT NULL AND e.next_run_at <= now()
+        AND NOT EXISTS (
+          SELECT 1 FROM jobs j
+           WHERE j.kind = 'automation.step'
+             AND j.state IN ('pending','running')
+             AND j.payload->>'enrollmentId' = e.id::text
+        )
+      ORDER BY e.next_run_at
+      LIMIT $2`,
+    [organizationId, limit],
+  );
+  for (const row of rows) {
+    await enqueue('automation.step', { enrollmentId: row.id }, {
+      organizationId,
+      dedupeKey: `automation.step:${row.id}:sweep:${row.current_node_key ?? 'end'}`,
+    });
+  }
+  if (rows.length) {
+    log.warn('re-queued automation steps whose job had gone missing', { count: rows.length });
+  }
+  return { requeued: rows.length };
+}
+
 export async function enrol(
   automation: PublishedAutomation,
   organizationId: string,

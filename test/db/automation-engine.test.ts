@@ -16,7 +16,9 @@ import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool, query, queryOne } from '../../src/db/pool.ts';
 import { migrate } from '../../src/db/migrate.ts';
-import { enrol, gatherFacts, processEvents, runStep } from '../../src/services/automation-engine.ts';
+import {
+  enrol, gatherFacts, processEvents, runStep, sweepDueEnrollments,
+} from '../../src/services/automation-engine.ts';
 import { DefinitionSchema, type AutomationDefinition } from '../../src/domain/automation.ts';
 
 let orgId: string;
@@ -296,3 +298,72 @@ async function publishedRow() {
          ON v.automation_id = a.id AND v.version = a.published_version`);
   return { ...row, definition: DefinitionSchema.parse(row!.definition) };
 }
+
+test('a wait schedules the next step rather than running it', async () => {
+  const automation = await publish('slow', DefinitionSchema.parse({
+    trigger: { type: 'manual', filters: [] },
+    entry_conditions: [], stop_conditions: [],
+    start_node: 'hold',
+    nodes: [
+      { key: 'hold', type: 'wait', hours: 4, next: 'tag' },
+      { key: 'tag', type: 'add_tag', tag: 'waited', next: 'end' },
+      { key: 'end', type: 'stop' },
+    ],
+  }));
+  const enrollmentId = await enrol(automation as never, orgId, customerId, applicationId, 'test');
+  const outcome = await runStep(enrollmentId!);
+  assert.equal(outcome.status, 'waiting');
+
+  const row = await queryOne<{ current_node_key: string; next_run_at: string }>(
+    'SELECT current_node_key, next_run_at FROM automation_enrollments WHERE id = $1', [enrollmentId]);
+  assert.equal(row!.current_node_key, 'tag');
+  const dueInHours = (new Date(row!.next_run_at).getTime() - Date.now()) / 3_600_000;
+  assert.ok(dueInHours > 3.9 && dueInHours < 4.1, `due in ${dueInHours}h`);
+
+  const customer = await queryOne<{ tags: string[] }>(
+    'SELECT tags FROM customers WHERE id = $1', [customerId]);
+  assert.ok(!customer!.tags?.includes('waited'), 'the step after the wait did not run early');
+});
+
+test('the sweeper recovers an enrollment whose job went missing', async () => {
+  const automation = await publish('sweepable', DefinitionSchema.parse({
+    trigger: { type: 'manual', filters: [] },
+    entry_conditions: [], stop_conditions: [],
+    start_node: 'tag',
+    nodes: [
+      { key: 'tag', type: 'add_tag', tag: 'swept', next: 'end' },
+      { key: 'end', type: 'stop' },
+    ],
+  }));
+  const enrollmentId = await enrol(automation as never, orgId, customerId, applicationId, 'test');
+
+  // The job the enrollment was relying on is gone: dead-lettered after its
+  // retries, or dropped by a worker that died mid-claim.
+  await query(`DELETE FROM jobs WHERE kind = 'automation.step'`);
+  assert.equal((await sweepDueEnrollments(orgId)).requeued, 1);
+
+  const job = await queryOne<{ state: string; payload: { enrollmentId: string } }>(
+    `SELECT state, payload FROM jobs WHERE kind = 'automation.step'`);
+  assert.equal(job?.payload.enrollmentId, enrollmentId);
+
+  // And an enrollment whose job is healthy is not queued a second time.
+  assert.equal((await sweepDueEnrollments(orgId)).requeued, 0);
+});
+
+test('a future step is left alone by the sweeper', async () => {
+  const automation = await publish('later', DefinitionSchema.parse({
+    trigger: { type: 'manual', filters: [] },
+    entry_conditions: [], stop_conditions: [],
+    start_node: 'tag',
+    nodes: [
+      { key: 'tag', type: 'add_tag', tag: 'later', next: 'end' },
+      { key: 'end', type: 'stop' },
+    ],
+  }));
+  const enrollmentId = await enrol(automation as never, orgId, customerId, applicationId, 'test');
+  await query(`DELETE FROM jobs WHERE kind = 'automation.step'`);
+  await query(
+    `UPDATE automation_enrollments SET next_run_at = now() + interval '3 days' WHERE id = $1`,
+    [enrollmentId]);
+  assert.equal((await sweepDueEnrollments(orgId)).requeued, 0);
+});
