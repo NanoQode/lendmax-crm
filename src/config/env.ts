@@ -33,6 +33,10 @@ const RawEnv = z.object({
   DATABASE_POOL_MAX: z.coerce.number().int().positive().max(100).default(10),
 
   SESSION_SECRET: z.string().optional(),
+  // Encrypts integration credentials held in the database. Separate from
+  // SESSION_SECRET on purpose: rotating the session secret signs everybody out,
+  // which should not also make every stored credential unreadable.
+  CREDENTIALS_KEY: z.string().optional(),
   SESSION_TTL_HOURS: z.coerce.number().positive().default(12),
   SESSION_ABSOLUTE_TTL_HOURS: z.coerce.number().positive().default(168),
 
@@ -118,6 +122,12 @@ function load(source: NodeJS.ProcessEnv = process.env): Env {
   }
   if (isProduction && secret.length < 32) {
     throw new Error('SESSION_SECRET is too short — use at least 32 characters.');
+  }
+  if (isProduction && !env.CREDENTIALS_KEY) {
+    throw new Error(
+      'CREDENTIALS_KEY is required in production — it encrypts the integration credentials ' +
+        'held in the database. Generate one with: openssl rand -base64 32',
+    );
   }
 
   if (isProduction && env.SCARLETT_MODE === 'live' && !env.SCARLETT_API_KEY) {

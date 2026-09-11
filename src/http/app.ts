@@ -22,6 +22,7 @@ import { customerRoutes } from './routes/customers.ts';
 import { dashboardRoutes } from './routes/dashboard.ts';
 import { workRoutes } from './routes/work.ts';
 import { systemRoutes } from './routes/system.ts';
+import { internalRoutes } from './routes/internal.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = path.resolve(here, '../../web/public');
@@ -116,6 +117,10 @@ export function createApp(): Express {
       message: { ok: false, code: 'rate_limited', error: 'Too many requests. Slow down.' },
     }),
   );
+
+  // Service-to-service, authenticated by shared secret rather than a session.
+  // Mounted before attachUser because there is no user behind these calls.
+  api.use('/internal', internalRoutes);
 
   api.use('/auth', authRoutes);
   api.use(attachUser);
