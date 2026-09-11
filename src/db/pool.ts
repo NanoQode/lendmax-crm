@@ -19,6 +19,17 @@ import { log } from '../lib/logger.ts';
 pg.types.setTypeParser(pg.types.builtins.INT8, (v) => Number(v));
 pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => v);
 
+// A DATE stays a 'YYYY-MM-DD' string.
+//
+// By default the driver turns it into a JS Date at local midnight, which is the
+// precise confusion domain/dates.ts exists to prevent: a closing date is a date
+// in a contract, not an instant, and once it is a Date it shifts by a day for
+// anybody whose timezone is behind the server's. Keeping it a string means the
+// value that comes out of Postgres is the value that went in, and every
+// consumer goes through the calendar-date functions rather than through
+// Date.prototype.
+pg.types.setTypeParser(pg.types.builtins.DATE, (v) => v);
+
 export const pool = new pg.Pool({
   connectionString: env.DATABASE_URL,
   max: env.DATABASE_POOL_MAX,

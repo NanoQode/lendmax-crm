@@ -13,6 +13,10 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "verbatimModuleSyntax": true,
+    // The runtime strips types, it does not compile them. This makes tsc reject
+    // any construct that would need code generated (enums, namespaces,
+    // parameter properties) instead of letting it fail at boot.
+    "erasableSyntaxOnly": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
