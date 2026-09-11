@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Lendmax — Canadian mortgage brokerage CRM for lendmax.ca/crm",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build:server": "tsc -p tsconfig.json",
     "build:web": "node scripts/build-web.mjs",
@@ -34,6 +36,7 @@
     "@types/node": "^22.15.3",
     "@types/pg": "^8.15.5",
     "esbuild": "^0.25.10",
+    "playwright": "^1.63.0",
     "preact": "^10.27.2",
     "typescript": "^5.9.2"
   }

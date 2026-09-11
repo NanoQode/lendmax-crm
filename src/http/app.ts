@@ -11,6 +11,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { env } from '../config/env.ts';
 import { log } from '../lib/logger.ts';
@@ -25,6 +26,26 @@ import { systemRoutes } from './routes/system.ts';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = path.resolve(here, '../../web/public');
 
+/**
+ * Hashes of the inline scripts in index.html, written by scripts/build-web.mjs.
+ *
+ * Read at boot rather than hard-coded, so editing the theme bootstrap cannot
+ * leave a policy that silently blocks it — which is exactly what happened once
+ * and only showed up in a browser console.
+ */
+function inlineScriptHashes(): string[] {
+  try {
+    const raw = readFileSync(path.join(WEB_ROOT, 'csp-hashes.json'), 'utf8');
+    const parsed = JSON.parse(raw) as { scripts?: string[] };
+    return (parsed.scripts ?? []).map((h) => `'${h}'`);
+  } catch {
+    // No build yet (or a stale one). The policy stays strict; the theme
+    // bootstrap is then blocked and the app still works, one flash the worse.
+    log.warn('no csp-hashes.json found — inline theme script will be blocked');
+    return [];
+  }
+}
+
 export function createApp(): Express {
   const app = express();
 
@@ -38,10 +59,12 @@ export function createApp(): Express {
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          // The app bundle is a file, not an inline block. Styles allow inline
-          // because the theme writes CSS custom properties onto the root
-          // element; scripts do not, which is where injection actually lands.
-          scriptSrc: ["'self'"],
+          // The app bundle is a file. The one inline script we ship — the
+          // theme bootstrap that runs before first paint — is allowed by its
+          // SHA-256, written by the build. Not 'unsafe-inline': that would
+          // permit every injected script as well as ours, which is the whole
+          // thing the policy is for.
+          scriptSrc: ["'self'", ...inlineScriptHashes()],
           styleSrc: ["'self'", "'unsafe-inline'"],
           imgSrc: ["'self'", 'data:', 'blob:'],
           connectSrc: ["'self'"],

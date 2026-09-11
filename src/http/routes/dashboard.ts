@@ -134,7 +134,11 @@ dashboardRoutes.get(
         JOIN customers c ON c.id = app.customer_id
         LEFT JOIN pipeline_stages ps
                ON ps.organization_id = app.organization_id AND ps.key = app.stage_key
-       WHERE app.organization_id = $1 AND app.archived_at IS NULL AND ${visibility}`;
+       WHERE app.organization_id = $1 AND app.archived_at IS NULL AND ${visibility}
+         -- Lost files are excluded here for the same reason they generate no
+         -- suggestions: otherwise "1 client waiting" sits above a priority list
+         -- that correctly shows nothing, and the two disagree on screen.
+         AND COALESCE(ps.category, 'open') <> 'lost'`;
 
     const [kpis, tasks, appointments, funded] = await Promise.all([
       query(kpiSql, params),
