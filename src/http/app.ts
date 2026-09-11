@@ -23,6 +23,7 @@ import { dashboardRoutes } from './routes/dashboard.ts';
 import { workRoutes } from './routes/work.ts';
 import { systemRoutes } from './routes/system.ts';
 import { internalRoutes } from './routes/internal.ts';
+import { integrationRoutes } from './routes/integrations.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = path.resolve(here, '../../web/public');
@@ -128,6 +129,7 @@ export function createApp(): Express {
   api.use('/', dashboardRoutes);
   api.use('/', customerRoutes);
   api.use('/', workRoutes);
+  api.use('/', integrationRoutes);
 
   api.use((_req, res) => {
     res.status(404).json({ ok: false, code: 'not_found', error: 'No such endpoint.' });

@@ -14,6 +14,8 @@ import { env } from './config/env.ts';
 import { log } from './lib/logger.ts';
 import { closePool, healthcheck, query } from './db/pool.ts';
 import { loadMigrations } from './db/migrate.ts';
+import { registerHandlers } from './jobs/handlers/index.ts';
+import { startWorker, stopWorker } from './jobs/worker.ts';
 
 async function assertSchemaIsCurrent(): Promise<void> {
   const files = await loadMigrations();
@@ -47,6 +49,18 @@ async function main(): Promise<void> {
     throw err;
   }
 
+  // The worker runs in this process by default. For a brokerage's volume that
+  // is the right trade — one thing to deploy, one thing to watch — and
+  // WORKER_ENABLED=0 moves it to its own process without touching anything
+  // else.
+  const workerEnabled = process.env.WORKER_ENABLED !== '0';
+  if (workerEnabled) {
+    registerHandlers();
+    startWorker();
+  } else {
+    log.warn('the background worker is disabled; scheduled messages will not go out');
+  }
+
   const app = createApp();
   const server = app.listen(env.PORT, () => {
     log.info('lendmax-crm listening', {
@@ -76,6 +90,8 @@ async function main(): Promise<void> {
 
     server.close(async () => {
       try {
+        // The worker drains before the pool closes, or a job dies mid-write.
+        await stopWorker();
         await closePool();
       } catch (err) {
         log.error('failed to close the database pool', { error: err });

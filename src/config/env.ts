@@ -53,9 +53,13 @@ const RawEnv = z.object({
   PORTAL_INTERNAL_API_KEY: z.string().optional(),
   PORTAL_WEBHOOK_SECRET: z.string().optional(),
 
-  SCARLETT_BASE_URL: z.string().optional(),
+  // The host is fixed (api.scarlettnetwork.com) rather than configurable:
+  // pointing it at .net is the mistake that cost the portal team a working
+  // integration, and a setting invites it.
   SCARLETT_API_KEY: z.string().optional(),
-  SCARLETT_PARTNER_ID: z.string().optional(),
+  SCARLETT_FIRM_CODE: z.string().optional(),
+  SCARLETT_EXPERT_LOGIN: z.string().optional(),
+  SCARLETT_DB_NAME: z.string().optional(),
   SCARLETT_MODE: z.enum(['sandbox', 'live']).default('sandbox'),
 
   VOIPMS_API_USER: z.string().optional(),
@@ -130,9 +134,7 @@ function load(source: NodeJS.ProcessEnv = process.env): Env {
     );
   }
 
-  if (isProduction && env.SCARLETT_MODE === 'live' && !env.SCARLETT_API_KEY) {
-    throw new Error('SCARLETT_MODE=live without SCARLETT_API_KEY — refusing to start.');
-  }
+
   // The opposite mistake matters more: pushing test deals into a live broker
   // network is not undoable from here.
   if (!isProduction && env.SCARLETT_MODE === 'live') {
@@ -177,11 +179,12 @@ export function describeIntegrations(e: Env = env): IntegrationStatus[] {
     {
       id: 'scarlett',
       name: 'Scarlett Mortgage',
-      configured: Boolean(e.SCARLETT_BASE_URL && e.SCARLETT_API_KEY),
+      configured: Boolean(e.SCARLETT_API_KEY && e.SCARLETT_FIRM_CODE && e.SCARLETT_EXPERT_LOGIN),
       mode: e.SCARLETT_MODE,
       missing: need([
-        ['SCARLETT_BASE_URL', e.SCARLETT_BASE_URL],
         ['SCARLETT_API_KEY', e.SCARLETT_API_KEY],
+        ['SCARLETT_FIRM_CODE', e.SCARLETT_FIRM_CODE],
+        ['SCARLETT_EXPERT_LOGIN', e.SCARLETT_EXPERT_LOGIN],
       ]),
     },
     {

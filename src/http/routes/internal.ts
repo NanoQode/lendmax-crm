@@ -8,13 +8,15 @@
 import { Router } from 'express';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { queryOne } from '../../db/pool.ts';
+import { query, queryOne } from '../../db/pool.ts';
 import { log } from '../../lib/logger.ts';
 import { safeEqual } from '../../lib/secrets.ts';
 import { resolveIntegration } from '../../services/integrations.ts';
 import {
   importMirrorPayload, logMirrorFailure, type MirrorPayload,
 } from '../../services/portal-import.ts';
+import { parseInboundCallback } from '../../integrations/voipms.ts';
+import { receiveInbound } from '../../services/messaging.ts';
 import { asyncRoute } from '../middleware/errors.ts';
 
 export const internalRoutes: Router = Router();
@@ -150,5 +152,95 @@ internalRoutes.get(
       return;
     }
     res.json({ ok: true, service: 'lendmax-crm', accepts: 'mirror' });
+  }),
+);
+
+/**
+ * VoIP.ms inbound SMS/MMS.
+ *
+ * VoIP.ms calls a URL you paste into their portal, as a GET with query
+ * parameters, and it has no signing mechanism. The only thing available is a
+ * secret in the URL, compared in constant time — so the URL itself is the
+ * credential and must be treated as one.
+ *
+ * It answers 200 to almost everything on purpose. VoIP.ms retries on a
+ * non-2xx, and a message we have decided to hold for a person is not a message
+ * we want re-delivered every few minutes.
+ */
+internalRoutes.get(
+  '/voipms/inbound',
+  internalLimiter,
+  asyncRoute(async (req, res) => {
+    const organizationId = await currentOrganizationId();
+    if (!organizationId) {
+      res.status(503).send('no organization');
+      return;
+    }
+
+    const integration = await resolveIntegration(organizationId, 'voipms');
+    const expected = String(integration.values.webhook_secret ?? '');
+    if (!expected) {
+      log.error('voip.ms callback refused: no inbound key configured');
+      res.status(503).send('not configured');
+      return;
+    }
+    const presented = String(req.query.key ?? req.get('x-webhook-key') ?? '');
+    if (!safeEqual(presented, expected)) {
+      log.warn('voip.ms callback rejected: bad key', { ip: req.ip });
+      res.status(401).send('unauthorised');
+      return;
+    }
+
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(req.query)) {
+      params.set(k, String(Array.isArray(v) ? v[0] : v));
+    }
+    const inbound = parseInboundCallback(params);
+
+    // Stored before it is acted on. A callback that arrives and cannot be
+    // processed is a bug to fix, not an event to lose.
+    await query(
+      `INSERT INTO webhook_events (provider, event_type, external_id, payload, signature_ok)
+       VALUES ('voipms','inbound_sms',$1,$2::jsonb,true)
+       ON CONFLICT (provider, external_id) WHERE external_id IS NOT NULL DO NOTHING`,
+      [inbound.providerMessageId, JSON.stringify(Object.fromEntries(params))],
+    );
+
+    if (!inbound.from) {
+      log.warn('voip.ms callback had no usable sender', { raw: params.get('from') });
+      res.status(200).send('ok');
+      return;
+    }
+
+    try {
+      const result = await receiveInbound({
+        organizationId,
+        channel: inbound.mediaUrls.length ? 'mms' : 'sms',
+        from: inbound.from,
+        to: inbound.to,
+        body: inbound.body,
+        mediaUrls: inbound.mediaUrls,
+        provider: 'voipms',
+        providerMessageId: inbound.providerMessageId,
+        receivedAt: inbound.receivedAt,
+      });
+      await query(
+        `UPDATE webhook_events SET processed_at = now()
+          WHERE provider = 'voipms' AND external_id = $1`,
+        [inbound.providerMessageId],
+      );
+      log.info('inbound sms', { status: result.status, from: inbound.from });
+    } catch (err) {
+      await query(
+        `UPDATE webhook_events SET process_error = $2, attempts = attempts + 1
+          WHERE provider = 'voipms' AND external_id = $1`,
+        [inbound.providerMessageId, err instanceof Error ? err.message : String(err)],
+      ).catch(() => {});
+      log.error('could not process an inbound sms', { error: err });
+    }
+
+    // 200 regardless: the event is stored either way, and a retry would
+    // duplicate rather than repair.
+    res.status(200).send('ok');
   }),
 );

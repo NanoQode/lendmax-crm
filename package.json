@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Lendmax \u2014 Canadian mortgage brokerage CRM for lendmax.ca/crm",
+  "description": "Lendmax — Canadian mortgage brokerage CRM for lendmax.ca/crm",
   "engines": {
     "node": ">=22"
   },
@@ -21,11 +21,13 @@
     "verify": "npm run typecheck && npm test && npm run test:db"
   },
   "dependencies": {
+    "@types/nodemailer": "^8.0.1",
     "cookie-parser": "^1.4.7",
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
     "helmet": "^8.1.0",
     "multer": "^2.0.2",
+    "nodemailer": "^10.0.8",
     "pg": "^8.16.3",
     "zod": "^3.25.76"
   },

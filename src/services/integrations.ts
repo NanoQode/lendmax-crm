@@ -86,25 +86,35 @@ export const INTEGRATION_SPECS: Record<IntegrationKey, IntegrationSpec> = {
 
   scarlett: {
     key: 'scarlett',
-    name: 'Scarlett Mortgage',
-    summary: 'Where a deal goes once the file is ready for a lender.',
+    name: 'Scarlett Network',
+    summary:
+      'Where a deal goes once the file is ready for a lender. One API key, sent in the body of ' +
+      'every call — there is no token to refresh and nothing that expires.',
     whenOff: 'Push to Scarlett is unavailable and files cannot leave the Scarlett stage.',
     testable: true,
     fields: [
-      { name: 'base_url', label: 'API base URL', type: 'url', required: true,
-        envVar: 'SCARLETT_BASE_URL' },
-      { name: 'api_key', label: 'API key', secret: true, required: true, envVar: 'SCARLETT_API_KEY' },
-      { name: 'partner_id', label: 'Partner ID', envVar: 'SCARLETT_PARTNER_ID' },
+      { name: 'api_key', label: 'API key', secret: true, required: true, envVar: 'SCARLETT_API_KEY',
+        help: 'Created in Scarlett under Settings → API Access. Shown once, so keep a copy. ' +
+              'Sent as APIKey in the request body, not as a header.' },
+      { name: 'firm_code', label: 'Firm code', required: true, envVar: 'SCARLETT_FIRM_CODE',
+        help: 'Identifies the brokerage on a deal push.' },
+      { name: 'expert_login', label: 'Expert login', required: true, envVar: 'SCARLETT_EXPERT_LOGIN',
+        help: 'The Scarlett user a pushed deal is filed under.' },
+      { name: 'db_name', label: 'Database name', envVar: 'SCARLETT_DB_NAME',
+        help: 'Only where Scarlett has told you to set one. Left blank otherwise.' },
+      { name: 'pipeline_stage_id', label: 'Pipeline stage ID',
+        help: 'Which stage a pushed deal lands on in Scarlett. Blank uses their default.' },
+      { name: 'notification_flag', label: 'Notify the expert on push', type: 'boolean' },
       { name: 'mode', label: 'Mode', type: 'select', required: true, envVar: 'SCARLETT_MODE',
         options: [
-          { value: 'sandbox', label: 'Sandbox — safe to experiment' },
+          { value: 'sandbox', label: 'Sandbox — nothing is sent' },
           { value: 'live', label: 'Live — creates real deals' },
         ],
         help: 'Live mode is refused outright on a non-production server. A test deal in a real ' +
               'broker network cannot be taken back from here.' },
       { name: 'auto_push', label: 'Push automatically when a file is ready', type: 'boolean',
-        help: 'Off by default. A broker may want to hold a file back, and an automatic push ' +
-              'removes that choice.' },
+        help: 'Off by default, at Ali’s instruction — a broker may want to hold a file back, ' +
+              'and an automatic push removes that choice.' },
     ],
   },
 
@@ -227,9 +237,10 @@ const ENV_FALLBACK: Record<IntegrationKey, Record<string, unknown>> = {
     webhook_secret: env.PORTAL_WEBHOOK_SECRET,
   },
   scarlett: {
-    base_url: env.SCARLETT_BASE_URL,
     api_key: env.SCARLETT_API_KEY,
-    partner_id: env.SCARLETT_PARTNER_ID,
+    firm_code: env.SCARLETT_FIRM_CODE,
+    expert_login: env.SCARLETT_EXPERT_LOGIN,
+    db_name: env.SCARLETT_DB_NAME,
     mode: env.SCARLETT_MODE,
   },
   voipms: {
