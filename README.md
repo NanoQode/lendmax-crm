@@ -15,21 +15,27 @@ Lead → Application → Appointment → Underwriting → Scarlett → Condition
      → Compliance → Funded → Commission → Renewal
 ```
 
-**Built and working today:** the database (nine migrations, every table in that
-pipeline), the domain rules with tests, authentication and RBAC, a
-hash-chained audit log, the HTTP API for customers, pipeline, tasks, notes,
-timeline and settings, and an interface covering sign-in, dashboard, customer
-list, board and the client workspace.
+**Built, running and tested:** fifteen migrations covering every table in that
+pipeline; the domain rules with 170 unit tests and 90 tests against a real
+database; authentication and RBAC across five roles; a hash-chained audit log
+the database refuses to rewrite; the portal importer against the live mirror
+contract; a Postgres job queue; the Scarlett, VoIP.ms and email adapters, all
+configured from a screen rather than a deploy; documents with a client upload
+link and signed downloads; the automation engine and its builder; compliance
+with an explainable risk meter, FINTRAC, identity and suitability; funding,
+commission and renewals; campaigns with the full consent arithmetic; reports
+built on recorded history; the calendar; and the administration screens.
 
-**Not built:** the portal importer, the Scarlett and VoIP.ms adapters, the
-automation runtime, campaigns, and the compliance screens. Their schema, their
-rules and in several cases their API are in place; the connecting code is not.
-Section 8 lists exactly what remains.
+**Not built:** Google Calendar sync, S3 storage, virus scanning, the retention
+runner, campaign attribution, inbound email, and the AI suitability draft.
+Section 8 lists each one and why it is where it is.
 
-Where a module is not built, the interface says so. It does not show a mocked
-board, a static chart or a button that does nothing — a panel that looks
-finished and stores nothing is how a product gets signed off and then does not
-work.
+Where a module is not built, the interface says so in the place it would
+otherwise appear. It does not show a mocked board, a static chart or a button
+that does nothing — a panel that looks finished and stores nothing is how a
+product gets signed off and then does not work. The calendar says Google is
+not connected; the document store refuses rather than pretending; the scanner
+reports `skipped` rather than `clean`.
 
 ---
 
@@ -235,18 +241,37 @@ than with a guessed stress-test rate.
 ## 5. Layout
 
 ```
-migrations/          0001–0009, checksummed, one transaction each
+migrations/          0001–0015, checksummed, one transaction each
 src/
   config/env.ts      validated at boot; refuses to start rather than start wrong
   db/                pool (NUMERIC and DATE parsers), migration runner
-  domain/            pure rules — permissions, dates, consent, pipeline, next-action
-  lib/               logger (with redaction), phone (E.164), canonical JSON
-  services/          auth (scrypt, revocable sessions), audit (hash chain)
+  domain/            pure rules, all tested without a database:
+                       permissions, dates, consent, pipeline, next-action,
+                       automation, merge-fields, risk, money, segment, blocks
+  lib/               logger (with redaction), phone (E.164), canonical JSON,
+                       secrets (AES-256-GCM)
+  services/          auth, audit, portal-import, messaging, storage, assignment,
+                       integrations, automation-engine, compliance, campaigns,
+                       unsubscribe
+  integrations/      scarlett, voipms, email — each reading dashboard config
+  jobs/              queue (FOR UPDATE SKIP LOCKED), worker, handlers
   http/              app, middleware, routes
-web/src/             Preact client — components, pages, tokens
+web/src/             Preact client — components, pages, design tokens
 docs/field-map.md    the 124-field portal mapping
-test/                90 unit + 4 database-backed
+test/                170 unit + 90 database-backed
 ```
+
+`npm run verify` runs the type checker over both the server and the front end,
+then both test suites. The front end is type-checked separately
+(`tsconfig.web.json`) because esbuild strips types without checking them, and
+an unchecked front end finds a renamed API field with a blank panel.
+
+`node scripts/smoke.mjs` opens every screen as every role against a running
+server. It is the cheapest check here and the one that has found the most: a
+screen that renders is not necessarily one that works, but a screen that does
+not render is definitely broken, and the type checker will not tell you. It
+needs real accounts, so it is a development tool rather than part of
+`verify`.
 
 ---
 
@@ -317,45 +342,50 @@ Restore has to be *rehearsed*, not documented — an untested restore is a hope.
 
 ## 8. What remains
 
-In dependency order. Each line is real work, not a stub to fill in.
+Items 1 to 10 of the original list are built, running and tested. What is
+left is genuinely left — each line is real work, not a stub to fill in.
 
-1. **Portal importer** — the webhook, the upsert, the customer resolver, the
-   backfill of the 17 applications already mirrored into
-   `/var/lib/lendmax/lendmax.db`. Steps are spelled out in
-   `docs/field-map.md` §5. *Nothing downstream is real until this runs.*
-2. **Job worker** — the `jobs` table and its claim/retry/dead-letter shape
-   exist; the runner loop and the handler registry do not.
-3. **Email and SMS adapters** — behind the send gate, which is finished. VoIP.ms
-   needs inbound webhook verification, media fetching, E.164 matching (done) and
-   the ambiguous-number flag: if an inbound number matches two contacts, flag it
-   rather than attach it to the wrong client.
-4. **Documents** — request flow, the client upload link (tokens are hashed in
-   the schema already), signed download, virus scanning.
-5. **Automation runtime** — versioning, enrollment and stop conditions are
-   modelled; the step executor, the scheduler and the builder are not.
-6. **Scarlett adapter** — a mapping configuration rather than mappings spread
-   through the code, `POST` with validation before push, duplicate prevention,
-   and errors that say *"the deal was missing a valid subject-property
-   province"* rather than *500*.
-7. **Compliance screens** — checklist, FINTRAC, risk, suitability, package
-   export.
-8. **Funding, commission, renewals** — schema complete; screens and the
-   milestone job are not.
-9. **Campaigns** — block builder, segment evaluator, throttled sender.
-10. **Analytics** — conversion by stage, time-in-stage, lender mix, broker
-    performance. `stage_transitions` already records what these need.
-11. **Google Calendar** — OAuth, token storage, idempotent event sync.
+1. **Google Calendar** — OAuth, token storage, idempotent event sync. The
+   appointment schema carries `google_event_id` and the calendar screen says
+   plainly that it is not connected, rather than implying a sync that is not
+   happening.
+2. **S3 document storage** — the storage service has a local driver and an S3
+   driver that *throws* rather than silently no-oping, which is deliberate: a
+   document a broker believes is stored and is not is worse than an error.
+   The S3 path needs implementing and the migration of existing files planned.
+3. **Virus scanning** — `scanObject` returns `skipped` visibly rather than
+   `clean`, so nothing in the system believes a file has been scanned when it
+   has not. A scanner needs wiring in.
+4. **The retention runner** — the policies are configured, dated and sourced,
+   and every one defaults to `review`. The job that walks them and *proposes*
+   (never executes) does not exist yet.
+5. **The backfill** — the 17 applications already mirrored into
+   `/var/lib/lendmax/lendmax.db` have not been imported. The importer handles
+   them; nobody has run it against them.
+6. **Campaign attribution** — `campaign_attributions` is written by nothing
+   yet. The reporting reads it and correctly shows zero; the job that
+   attributes an application or a funding back to a campaign that preceded it
+   is not written.
+7. **Inbound email** — outbound email works through four drivers. Replies are
+   not ingested, so a client replying to a CRM email reaches the broker's own
+   inbox rather than the file.
+8. **The suitability AI draft** — the schema and the screen record that a
+   draft was AI-assisted and that a named person adopted it. Nothing generates
+   the draft, and nothing will until the prompt is built to send the minimum
+   necessary and never a SIN, an identification number or a credit file.
 
-### Credentials needed before 3, 6 and 11 can be finished
+### Credentials still needed
 
-`VOIPMS_API_USER`, `VOIPMS_API_PASSWORD`, `VOIPMS_DEFAULT_DID`,
-`VOIPMS_WEBHOOK_SECRET`; `SCARLETT_BASE_URL`, `SCARLETT_API_KEY`,
-`SCARLETT_PARTNER_ID`; `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`;
-`PORTAL_INTERNAL_API_KEY`, `PORTAL_WEBHOOK_SECRET`; an email provider key.
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` for the calendar; an S3 bucket
+and credentials for document storage.
 
-Every one is already defined in `.env.example` and surfaced on the Integrations
-screen, which names the exact variables missing for each integration. Nothing
-is blocked on a credential *today* — the code is built around them.
+Everything else — VoIP.ms, Scarlett, the portal's internal key, the email
+provider — is configured **from the Integrations screen**, held encrypted in
+the database, and takes effect without a deploy. The environment file is a
+fallback, not the source: a rotated credential is a form, not a release.
+
+The Integrations screen names the exact fields missing for each integration
+rather than reporting "not configured".
 
 ### Before any regulatory rule is encoded
 

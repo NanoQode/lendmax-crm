@@ -62,7 +62,8 @@ export function IntegrationsPage({ session }: { session: Session }) {
       </div>
 
       {state.status === 'loading' && <Skeleton rows={5} height={80} />}
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+      {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
 
       {state.status === 'ready' && (
         <div class="stack">

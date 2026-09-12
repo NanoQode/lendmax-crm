@@ -7,7 +7,7 @@
  * that is a dependency to upgrade rather than a problem solved.
  */
 import { useCallback, useEffect, useState } from 'preact/hooks';
-import { BASE, get, post, setUnauthenticatedHandler } from './api.ts';
+import { ApiError, BASE, get, post, setUnauthenticatedHandler } from './api.ts';
 
 // ── Routing ────────────────────────────────────────────────────────────────
 
@@ -144,7 +144,11 @@ export const allows = (permissions: string[], permission: string): boolean =>
 
 export type Async<T> =
   | { status: 'loading' }
-  | { status: 'error'; error: string }
+  // `code` carries the server's own code, so a refusal can be rendered as a
+  // refusal rather than as a fault. "You cannot open this" and "something
+  // broke" are different facts and a red panel for both teaches a broker to
+  // ignore red panels.
+  | { status: 'error'; error: string; code?: string; permission?: string }
   | { status: 'ready'; data: T };
 
 /**
@@ -166,7 +170,13 @@ export function useAsync<T>(path: string | null, deps: unknown[] = []): Async<T>
       .then((data) => setState({ status: 'ready', data }))
       .catch((err: Error) => {
         if (err.name === 'AbortError') return;
-        setState({ status: 'error', error: err.message });
+        const api = err as ApiError;
+        setState({
+          status: 'error',
+          error: err.message,
+          code: api.code,
+          permission: (api.body?.permission as string | undefined),
+        });
       });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -51,7 +51,8 @@ export function FundingTab({ applicationId, session, config }: {
   const [reconciling, setReconciling] = useState<Commission | null>(null);
 
   if (state.status === 'loading') return <Skeleton rows={5} height={54} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const d = state.data;
   const f = d.funding;
@@ -742,7 +743,8 @@ export function RenewalsPage({ session }: { session: Session }) {
       </div>
 
       {state.status === 'loading' && <Skeleton rows={5} height={60} />}
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+      {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
 
       {state.status === 'ready' && (
         <>

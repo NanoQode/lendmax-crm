@@ -49,7 +49,8 @@ export function CampaignsPage({ session }: { session: Session }) {
       </div>
 
       {state.status === 'loading' && <Skeleton rows={4} height={70} />}
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+      {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
 
       {state.status === 'ready' && (
         state.data.campaigns.length === 0 ? (
@@ -194,10 +195,12 @@ function CampaignEditor({ id, session }: { id: string; session: Session }) {
     return <div class="content-narrow"><Skeleton rows={5} height={60} /></div>;
   }
   if (state.status === 'error') {
-    return <div class="content-narrow"><ErrorNote error={state.error} onRetry={state.reload} /></div>;
+    return <div class="content-narrow"><ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} /></div>;
   }
   if (catalogue.status === 'error') {
-    return <div class="content-narrow"><ErrorNote error={catalogue.error} onRetry={catalogue.reload} /></div>;
+    return <div class="content-narrow"><ErrorNote error={catalogue.error} code={catalogue.code}
+               permission={catalogue.permission} onRetry={catalogue.reload} /></div>;
   }
 
   const d = state.data;
@@ -945,7 +948,8 @@ function RecipientList({ id, status }: { id: string; status: string }) {
     `/campaigns/${id}/recipients?status=${status}`, [id, status]);
 
   if (state.status === 'loading') return <div class="card-body"><Skeleton rows={3} /></div>;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
   if (state.data.recipients.length === 0) {
     return <Empty title="Nobody in that group" />;
   }

@@ -84,7 +84,8 @@ export function ComplianceTab({ applicationId, session }: {
   const [deciding, setDeciding] = useState(false);
 
   if (state.status === 'loading') return <Skeleton rows={6} height={54} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const data = state.data;
   const rating = data.risk?.override_rating ?? data.risk?.rating ?? 'review_required';
@@ -1235,7 +1236,8 @@ export function CompliancePage({ session }: { session: Session }) {
       </div>
 
       {state.status === 'loading' && <Skeleton rows={5} height={64} />}
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+      {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
 
       {state.status === 'ready' && (
         <>

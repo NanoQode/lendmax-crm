@@ -283,7 +283,8 @@ function TasksPage({ session }: { session: Session }) {
 
       <div class="card">
         {state.status === 'loading' && <Skeleton rows={4} />}
-        {state.status === 'error' && <div style={{ padding: 15 }}><ErrorNote error={state.error} onRetry={state.reload} /></div>}
+        {state.status === 'error' && <div style={{ padding: 15 }}><ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} /></div>}
         {state.status === 'ready' && state.data.tasks.length === 0 && (
           <Empty title="Nothing open">Tasks assigned to you appear here.</Empty>
         )}

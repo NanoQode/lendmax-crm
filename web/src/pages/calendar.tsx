@@ -80,7 +80,8 @@ export function CalendarPage({ session }: { session: Session }) {
       </div>
 
       {state.status === 'loading' && <Skeleton rows={3} height={90} />}
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+      {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
 
       {state.status === 'ready' && (
         <>

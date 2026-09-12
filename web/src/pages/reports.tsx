@@ -76,7 +76,8 @@ function PipelineReport({ months }: { months: string }) {
   }>(`/reports/pipeline?months=${months}`, [months]);
 
   if (state.status === 'loading') return <Skeleton rows={4} height={80} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const d = state.data;
   const top = d.funnel[0]?.reached ?? 0;
@@ -198,7 +199,8 @@ function VolumeReport({ months }: { months: string }) {
   }>(`/reports/volume?months=${months}`, [months]);
 
   if (state.status === 'loading') return <Skeleton rows={4} height={80} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const d = state.data;
   const peak = Math.max(1, ...d.monthly.map((m) => Number(m.volume ?? 0)));
@@ -304,7 +306,8 @@ function TeamReport({ months }: { months: string }) {
   }>(`/reports/team?months=${months}`, [months]);
 
   if (state.status === 'loading') return <Skeleton rows={4} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   return (
     <div class="card">
@@ -359,7 +362,8 @@ function CampaignReport({ months }: { months: string }) {
   }>(`/reports/campaigns?months=${months}`, [months]);
 
   if (state.status === 'loading') return <Skeleton rows={4} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   if (state.data.campaigns.length === 0) {
     return <div class="card"><Empty title="No campaigns sent in this period" /></div>;
@@ -431,7 +435,8 @@ function ComplianceReport() {
   }>('/reports/compliance');
 
   if (state.status === 'loading') return <Skeleton rows={4} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const d = state.data;
   const RATING_TONE: Record<string, 'ok' | 'warn' | 'danger' | 'neutral'> = {

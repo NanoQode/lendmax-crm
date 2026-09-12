@@ -58,7 +58,8 @@ export function ClientPage({ id, session, config }: {
   if (state.status === 'error') {
     return (
       <div class="content-narrow">
-        <ErrorNote error={state.error} onRetry={state.reload} />
+        <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />
         <button class="btn" onClick={() => navigate('/customers')}>
           <Icon path={ICONS.back} /> Back to customers
         </button>
@@ -409,7 +410,7 @@ function NotesTab({ id, session }: { id: string; session: Session }) {
         <div class="card-head"><h2>Notes</h2></div>
         <div class="card-body-flush">
           {state.status === 'loading' && <Skeleton rows={3} />}
-          {state.status === 'error' && <div style={{ padding: 15 }}><ErrorNote error={state.error} /></div>}
+          {state.status === 'error' && <div style={{ padding: 15 }}><ErrorNote error={state.error} code={state.code} permission={state.permission} /></div>}
           {state.status === 'ready' && state.data.notes.length === 0 && (
             <Empty title="No notes yet">Anything written here stays on the file permanently.</Empty>
           )}
@@ -439,7 +440,7 @@ function LogTab({ id }: { id: string }) {
       <div class="card-head"><h2>Everything that happened to this file</h2></div>
       <div class="card-body-flush">
         {state.status === 'loading' && <Skeleton rows={5} />}
-        {state.status === 'error' && <div style={{ padding: 15 }}><ErrorNote error={state.error} /></div>}
+        {state.status === 'error' && <div style={{ padding: 15 }}><ErrorNote error={state.error} code={state.code} permission={state.permission} /></div>}
         {state.status === 'ready' && state.data.activity.length === 0 && (
           <Empty title="Nothing recorded yet" />
         )}

@@ -81,7 +81,8 @@ function BrokerageSection({ canManage }: { canManage: boolean }) {
   const [editing, setEditing] = useState(false);
 
   if (state.status === 'loading') return <Skeleton rows={4} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const org = state.data.organization;
   const address = state.data.settings.find((s) => s.key === 'mailing_address');
@@ -363,7 +364,8 @@ function VocabularySection({ canManage }: { canManage: boolean }) {
         {error && <div class="card-body"><div class="alert alert-error">{error}</div></div>}
 
         {state.status === 'loading' && <div class="card-body"><Skeleton rows={4} /></div>}
-        {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+        {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
 
         {state.status === 'ready' && (
           <div class="card-body-flush">
@@ -567,7 +569,8 @@ function PeopleSection({ session }: { session: Session }) {
   const [showingRole, setShowingRole] = useState<string | null>(null);
 
   if (state.status === 'loading') return <Skeleton rows={4} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const d = state.data;
 
@@ -805,7 +808,8 @@ function TemplateSection({ session }: { session: Session }) {
   const [adding, setAdding] = useState(false);
 
   if (state.status === 'loading') return <Skeleton rows={4} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   return (
     <div class="stack">
@@ -965,7 +969,8 @@ function ComplianceRulesSection({ canManage }: { canManage: boolean }) {
   const [editingRetention, setEditingRetention] = useState<Record<string, any> | null>(null);
 
   if (state.status === 'loading') return <Skeleton rows={5} height={70} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   return (
     <div class="stack">

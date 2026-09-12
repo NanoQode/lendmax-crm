@@ -84,7 +84,8 @@ export function AutomationsPage({ session }: { session: Session }) {
       </div>
 
       {state.status === 'loading' && <Skeleton rows={4} height={76} />}
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+      {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
 
       {state.status === 'ready' && (
         state.data.automations.length === 0 ? (
@@ -274,10 +275,12 @@ function AutomationEditor({ id, session }: { id: string; session: Session }) {
     return <div class="content-narrow"><Skeleton rows={6} height={60} /></div>;
   }
   if (state.status === 'error') {
-    return <div class="content-narrow"><ErrorNote error={state.error} onRetry={state.reload} /></div>;
+    return <div class="content-narrow"><ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} /></div>;
   }
   if (catalogue.status === 'error') {
-    return <div class="content-narrow"><ErrorNote error={catalogue.error} onRetry={catalogue.reload} /></div>;
+    return <div class="content-narrow"><ErrorNote error={catalogue.error} code={catalogue.code}
+               permission={catalogue.permission} onRetry={catalogue.reload} /></div>;
   }
 
   const a = state.data.automation;
@@ -1139,7 +1142,8 @@ function Enrollments({ id, session }: { id: string; session: Session }) {
       </div>
       <div class="card-body-flush">
         {state.status === 'loading' && <div class="card-body"><Skeleton rows={3} /></div>}
-        {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+        {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
         {state.status === 'ready' && (
           state.data.enrollments.length === 0 ? (
             <Empty title={`No ${status === 'all' ? '' : status} enrollments`}>
@@ -1288,7 +1292,8 @@ export function ClientAutomations({ customerId, session }: {
   const canControl = session.permissions.includes('automation.control');
 
   if (state.status === 'loading') return <Skeleton rows={3} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} onRetry={state.reload} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
 
   const live = state.data.enrollments.filter(
     (e) => e.status === 'active' || e.status === 'paused');

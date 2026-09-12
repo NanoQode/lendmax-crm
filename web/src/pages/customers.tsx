@@ -94,7 +94,8 @@ export function CustomersPage({ session, config }: { session: Session; config: C
       <div class="card">
         {state.status === 'loading' && <Skeleton rows={6} />}
         {state.status === 'error' && (
-          <div style={{ padding: 15 }}><ErrorNote error={state.error} onRetry={state.reload} /></div>
+          <div style={{ padding: 15 }}><ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} /></div>
         )}
         {state.status === 'ready' && state.data.customers.length === 0 && (
           <Empty title={term || stage ? 'No files match those filters' : 'No customers yet'}
@@ -296,7 +297,8 @@ export function PipelinePage({ session }: { session: Session }) {
         </button>
       </div>
 
-      {state.status === 'error' && <ErrorNote error={state.error} onRetry={state.reload} />}
+      {state.status === 'error' && <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />}
       {state.status === 'loading' && <Skeleton rows={4} height={110} />}
 
       {state.status === 'ready' && (

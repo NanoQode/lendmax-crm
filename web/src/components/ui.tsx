@@ -91,7 +91,36 @@ export function Skeleton({ rows = 5, height = 34 }: { rows?: number; height?: nu
   );
 }
 
-export function ErrorNote({ error, onRetry }: { error: string; onRetry?: () => void }) {
+/**
+ * A failure, shown as what it actually is.
+ *
+ * A refusal is not a fault. "Your account cannot open this" in a calm panel
+ * with no retry button is the truth; the same thing in red with "Try again"
+ * invites somebody to click it five times and then phone the office. Only a
+ * genuine fault gets the red treatment, which is what keeps the red
+ * treatment meaning something.
+ */
+export function ErrorNote({ error, onRetry, code, permission }: {
+  error: string; onRetry?: () => void; code?: string; permission?: string;
+}) {
+  const refused = code === 'forbidden' || code === 'not_found';
+
+  if (refused) {
+    return (
+      <div class="card">
+        <div class="empty">
+          <h3>{code === 'not_found' ? 'Not here' : 'Not something your account can open'}</h3>
+          <p>{error}</p>
+          {permission && (
+            <p class="text-sm text-subtle">
+              The permission is <code>{permission}</code>.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div class="alert alert-error" role="alert">
       <div>{error}</div>
