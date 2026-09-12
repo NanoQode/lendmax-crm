@@ -47,7 +47,11 @@ echo "==> pruning build-only dependencies"
 npm prune --omit=dev 2>&1 | tail -2
 
 echo "==> starting"
-systemctl enable --now lendmax-brokerage-crm
+# enable --now does nothing to a service that is ALREADY running, so on every
+# deploy after the first it left the old code serving while reporting success.
+# Enable for boot, then restart unconditionally to pick up the new checkout.
+systemctl enable lendmax-brokerage-crm
+systemctl restart lendmax-brokerage-crm
 sleep 2
 systemctl is-active lendmax-brokerage-crm
 curl -fsS "http://127.0.0.1:${PORT:-3400}${BASE_PATH:-/crm}/api/health" && echo
