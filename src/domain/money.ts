@@ -65,11 +65,18 @@ export type SplitResult = {
 /**
  * Divide a commission.
  *
- * Fixed amounts come out first (a referral fee is a fee, not a share of what
- * is left), then percentages apply to the gross. The rounding remainder goes
- * to the LARGEST share rather than being dropped, so the parts always sum to
- * the whole — a split table that does not add up to the total is the first
- * thing anybody checks and the fastest way to lose their confidence.
+ * A fixed amount — a referral fee, typically — comes OFF THE TOP, and the
+ * percentages then divide what is left. The alternative, applying the
+ * percentages to the full gross and adding the fee on top, allocates more
+ * money than exists: a $500 referral fee plus 70/30 of $4,352 comes to
+ * $4,852, and a screen that shows that alongside a $4,352 commission is
+ * showing somebody money that is not there. (This was exactly the bug: the
+ * splits rendered correctly and the total was $500 too high.)
+ *
+ * The rounding remainder goes to the LARGEST share rather than being
+ * dropped, so the parts always sum to the whole — a split table that does
+ * not add up to the total is the first thing anybody checks and the fastest
+ * way to lose their confidence.
  */
 export function divideCommission(gross: Cents, splits: Split[]): SplitResult {
   const problems: string[] = [];
@@ -92,11 +99,14 @@ export function divideCommission(gross: Cents, splits: Split[]): SplitResult {
         : `The percentages come to ${trim(percentTotal)}%, leaving ${trim(100 - percentTotal)}% unallocated.`);
   }
 
+  // What the percentages divide: the gross, less anything taken off the top.
+  const pool = Math.max(gross - fixedTotal, 0);
+
   const computed: Array<Split & { amount: Cents }> = [
     ...fixed.map((s) => ({ ...s, amount: s.amount ?? 0 })),
     ...proportional.map((s) => ({
       ...s,
-      amount: Math.round((gross * (s.percent ?? 0)) / 100),
+      amount: Math.round((pool * (s.percent ?? 0)) / 100),
     })),
   ];
 

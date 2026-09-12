@@ -20,7 +20,8 @@ import { asyncRoute, AppError, notFound } from '../middleware/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { can } from '../../domain/permissions.ts';
 import {
-  approvalBlockers, deriveItem, gatherEvidence, openCase, reassess, syncDerivedItems,
+  approvalBlockers, deriveItem, gatherEvidence, openCase, reassess, refreshChecklist,
+  syncDerivedItems,
 } from '../../services/compliance.ts';
 
 export const complianceRoutes: Router = Router();

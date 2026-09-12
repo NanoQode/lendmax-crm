@@ -14,6 +14,8 @@ import {
   Avatar, Badge, Empty, ErrorNote, Field, Icon, ICONS, Modal, Skeleton, Urgency,
 } from '../components/ui.tsx';
 import { ClientAutomations } from './automations.tsx';
+import { ComplianceTab } from './compliance.tsx';
+import { FundingTab } from './funding.tsx';
 
 type Workspace = {
   application: Record<string, any>;
@@ -37,6 +39,7 @@ const TABS = [
   { key: 'compliance', label: 'Compliance' },
   { key: 'communication', label: 'Communication' },
   { key: 'documents', label: 'Documents' },
+  { key: 'funding', label: 'Funding' },
   { key: 'notes', label: 'Notes & Tasks' },
   { key: 'automations', label: 'Automations' },
   { key: 'log', label: 'Log' },
@@ -155,7 +158,8 @@ export function ClientPage({ id, session, config }: {
         {tab === 'notes' && <NotesTab id={id} session={session} />}
         {tab === 'log' && <LogTab id={id} />}
         {tab === 'documents' && <DocumentsTab data={state.data} />}
-        {tab === 'compliance' && <ComplianceTab data={state.data} />}
+        {tab === 'compliance' && <ComplianceTab applicationId={id} session={session} />}
+        {tab === 'funding' && <FundingTab applicationId={id} session={session} config={config} />}
         {tab === 'automations' && (
           <ClientAutomations customerId={String(app.customer_id)} session={session} />
         )}
@@ -355,37 +359,6 @@ function DocumentsTab({ data }: { data: Workspace }) {
             ))}
           </tbody>
         </table>
-      </div>
-    </div>
-  );
-}
-
-function ComplianceTab({ data }: { data: Workspace }) {
-  const c = data.compliance;
-  if (!c) {
-    return (
-      <Empty title="No compliance case open">
-        A compliance case opens when the file first needs compliance attention, and must be
-        approved by a compliance manager before the file can be marked Funded.
-      </Empty>
-    );
-  }
-  return (
-    <div class="stack">
-      <div class="card">
-        <div class="card-head"><h2>Compliance file</h2></div>
-        <div class="card-body">
-          <DL rows={[
-            ['Status', c.status.replace(/_/g, ' ')],
-            ['Required items outstanding', c.outstanding_required],
-            ['Approved', c.approved_at ? formatDate(c.approved_at) : 'Not approved'],
-            ['Legal hold', c.legal_hold ? 'Yes — this file must not be purged' : 'No'],
-          ]} />
-        </div>
-      </div>
-      <div class="alert alert-info">
-        The checklist, FINTRAC assessment, risk model and suitability rationale have schema and
-        API support but no screen yet — see the README for what is and is not built.
       </div>
     </div>
   );

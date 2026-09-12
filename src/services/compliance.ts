@@ -307,6 +307,44 @@ export async function syncDerivedItems(
   return changed.length;
 }
 
+/**
+ * Bring the stored checklist into line with the evidence, and say what is
+ * outstanding.
+ *
+ * One function, called from everywhere that shows a count, because the first
+ * version of this computed the number in two places and the file header said
+ * nine outstanding while the tab beneath it said eight. Two numbers for the
+ * same fact is worse than either being wrong.
+ */
+export async function refreshChecklist(
+  applicationId: string,
+  complianceCaseId: string,
+): Promise<{ outstanding_required: number; total_required: number; changed: number }> {
+  const evidence = await gatherEvidence(applicationId, complianceCaseId);
+  const { rows } = await query<{
+    id: string; item_key: string; status: string; required: boolean;
+  }>(
+    `SELECT id, item_key, status, required FROM compliance_checklist_items
+      WHERE compliance_case_id = $1`,
+    [complianceCaseId],
+  );
+  const answers = rows.map((r) => ({
+    ...r, derived_complete: deriveItem(r.item_key, evidence)?.complete ?? null,
+  }));
+  const changed = await syncDerivedItems(complianceCaseId, answers);
+
+  const required = answers.filter((a) => a.required);
+  const outstanding = required.filter((a) => {
+    const complete = a.derived_complete ?? (a.status === 'complete');
+    return !complete && a.status !== 'not_applicable';
+  });
+  return {
+    outstanding_required: outstanding.length,
+    total_required: required.length,
+    changed,
+  };
+}
+
 // ── The risk assessment ────────────────────────────────────────────────────
 
 export async function gatherRiskFacts(

@@ -315,6 +315,15 @@ fundingRoutes.post(
     if (splitResult?.problems.length) {
       throw new AppError(splitResult.problems[0]!, 400, 'invalid_splits', splitResult.problems);
     }
+    // A remainder that survived the rounding adjustment is money the splits
+    // do not account for, and confirming would record a table that does not
+    // add up to its own total.
+    if (splitResult && splitResult.remainder !== 0) {
+      throw new AppError(
+        `The splits come to ${fromCents(grossCents! - splitResult.remainder)} `
+        + `against a commission of ${fromCents(grossCents!)}.`,
+        400, 'invalid_splits');
+    }
 
     const maturity = funding.maturity_date
       ?? (funding.funding_date && funding.term_months

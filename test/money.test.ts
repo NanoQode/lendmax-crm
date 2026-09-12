@@ -58,19 +58,23 @@ test('splits always add up to the whole', () => {
   assert.deepEqual(result.problems, []);
 });
 
-test('a fixed referral fee comes out first, not out of a share', () => {
-  const result = divideCommission(425_000, [
+test('a fixed referral fee comes off the top, and the rest divides what is left', () => {
+  // The bug this pins down: applying the percentages to the full gross and
+  // adding the fee on top allocated $4,852 of a $4,352 commission, and the
+  // screen dutifully showed somebody $500 that did not exist.
+  const result = divideCommission(435_200, [
     { party: 'referrer', party_name: 'Kelly', amount: 50_000 },
     { party: 'broker', percent: 70 },
     { party: 'brokerage', percent: 30 },
   ]);
   const byParty = Object.fromEntries(result.splits.map((s) => [s.party, s.amount]));
   assert.equal(byParty.referrer, 50_000);
-  assert.equal(byParty.broker, 297_500, '70% of the gross, not of what is left');
-  assert.equal(byParty.brokerage, 127_500);
-  // Which means the fixed fee is genuinely over-allocated, and that is said
-  // out loud rather than absorbed.
-  assert.equal(result.remainder, -50_000);
+  assert.equal(byParty.broker, 269_640, '70% of what is left after the fee');
+  assert.equal(byParty.brokerage, 115_560);
+  assert.equal(result.splits.reduce((s, x) => s + x.amount, 0), 435_200,
+    'and the parts come to the whole');
+  assert.equal(result.remainder, 0);
+  assert.deepEqual(result.problems, []);
 });
 
 test('percentages that do not come to a hundred are named, not silently accepted', () => {

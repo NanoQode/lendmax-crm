@@ -164,11 +164,16 @@ test('confirming a funding does everything it makes true, in one act', async () 
     `SELECT party, amount FROM commission_splits s
        JOIN commission_records c ON c.id = s.commission_record_id
       WHERE c.application_id = $1 ORDER BY party`, [applicationId]);
+  // The referral fee comes off the top and the percentages divide what is
+  // left, so the three parts come to the commission exactly.
   assert.deepEqual(splits.rows, [
-    { party: 'broker', amount: '3046.40' },
-    { party: 'brokerage', amount: '1305.60' },
+    { party: 'broker', amount: '2696.40' },
+    { party: 'brokerage', amount: '1155.60' },
     { party: 'referrer', amount: '500.00' },
   ]);
+  assert.equal(
+    splits.rows.reduce((sum, s) => sum + Number(s.amount), 0), 4352,
+    'the splits add up to the commission, which is the first thing anybody checks');
 
   const renewal = await queryOne<{ maturity_date: string; status: string; assigned_to: string }>(
     'SELECT maturity_date, status, assigned_to FROM renewal_records WHERE application_id = $1',
@@ -317,4 +322,25 @@ test('a maturity already inside a milestone window is skipped, not fired at once
   assert.equal(milestones.rows[0]!.status, 'skipped');
   assert.match(milestones.rows[0]!.skip_reason, /already inside this window/);
   assert.equal(milestones.rows[2]!.status, 'pending', 'the one still ahead stays');
+});
+
+test('splits that allocate more than the commission stop the confirmation', async () => {
+  // Found by looking at the screen: a $500 referral fee plus 70/30 of the
+  // gross rendered as $4,852 of a $4,352 commission, and the confirmation
+  // had gone through.
+  await call('underwriter', 'PUT', `/applications/${applicationId}/funding`, goodFunding);
+  const result = await call('underwriter', 'POST',
+    `/applications/${applicationId}/funding/confirm`, {
+      commission_bps: 85,
+      splits: [
+        { party: 'referrer', party_name: 'Kelly', amount: '9000' },
+        { party: 'broker', user_id: brokerId, percent: 100 },
+      ],
+    });
+  assert.equal(result.status, 400);
+  assert.match(String(result.body.error), /more than the commission itself/);
+
+  const funding = await queryOne<{ confirmed: boolean }>(
+    'SELECT confirmed FROM funding_records WHERE application_id = $1', [applicationId]);
+  assert.equal(funding!.confirmed, false);
 });

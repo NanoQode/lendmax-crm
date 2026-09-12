@@ -14,6 +14,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, queryOne, withTransaction } from '../../db/pool.ts';
 import { recordAudit } from '../../services/audit.ts';
+import { refreshChecklist } from '../../services/compliance.ts';
 import { can } from '../../domain/permissions.ts';
 import { evaluateTransition, transitionEffects, type FileSnapshot, type StageDefinition } from '../../domain/pipeline.ts';
 import { daysToClose, todayIn } from '../../domain/dates.ts';
@@ -328,9 +329,9 @@ customerRoutes.get(
       ),
       queryOne(
         `SELECT cc.id, cc.status, cc.approved_at, cc.legal_hold,
-                (SELECT COUNT(*) FROM compliance_checklist_items i
-                  WHERE i.compliance_case_id = cc.id AND i.required AND i.status = 'outstanding')
-                  AS outstanding_required
+                -- Refreshed below from the same derivation the compliance tab
+                -- uses, so the header and the tab cannot disagree.
+                0 AS outstanding_required
            FROM compliance_cases cc WHERE cc.application_id = $1`,
         [id],
       ),
@@ -390,6 +391,15 @@ customerRoutes.get(
       : null;
 
     const today = todayIn(user.timezone ?? env.BROKERAGE_TIMEZONE);
+
+    // The header's compliance count comes from the same derivation the
+    // compliance tab uses. Computed in two places, it disagreed with itself.
+    if (compliance) {
+      const refreshed = await refreshChecklist(id, String((compliance as { id: string }).id));
+      (compliance as Record<string, unknown>).outstanding_required =
+        refreshed.outstanding_required;
+      (compliance as Record<string, unknown>).total_required = refreshed.total_required;
+    }
 
     res.json({
       ok: true,
