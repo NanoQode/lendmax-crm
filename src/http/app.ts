@@ -26,6 +26,7 @@ import { internalRoutes } from './routes/internal.ts';
 import { automationRoutes } from './routes/automations.ts';
 import { complianceRoutes } from './routes/compliance.ts';
 import { fundingRoutes } from './routes/funding.ts';
+import { campaignRoutes } from './routes/campaigns.ts';
 import { integrationRoutes } from './routes/integrations.ts';
 import { documentRoutes } from './routes/documents.ts';
 import { publicRoutes } from './routes/public.ts';
@@ -137,6 +138,7 @@ export function createApp(): Express {
   api.use('/', automationRoutes);
   api.use('/', complianceRoutes);
   api.use('/', fundingRoutes);
+  api.use('/', campaignRoutes);
   api.use('/', integrationRoutes);
   api.use('/', documentRoutes);
 

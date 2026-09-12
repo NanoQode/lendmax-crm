@@ -69,7 +69,7 @@ export type SendOutcome = {
   segments?: number;
 };
 
-async function loadSettings(organizationId: string): Promise<{
+export async function loadSettings(organizationId: string): Promise<{
   consentRules: ConsentRules; quietHours: QuietHours; timezone: string;
 }> {
   const { rows } = await query<{ key: string; value: Record<string, unknown> }>(

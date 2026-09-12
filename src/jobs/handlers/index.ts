@@ -10,11 +10,13 @@ import { registerHandler } from '../worker.ts';
 import { deliver } from '../../services/messaging.ts';
 import { pushDeal } from '../../integrations/scarlett.ts';
 import { registerAutomationHandlers } from './automation.ts';
+import { registerCampaignHandlers } from './campaign.ts';
 import { enqueue } from '../queue.ts';
 import { queryOne } from '../../db/pool.ts';
 
 export function registerHandlers(): void {
   registerAutomationHandlers();
+  registerCampaignHandlers();
 
   registerHandler('message.send', async (job) => {
     const messageId = String((job.payload as { messageId?: string }).messageId ?? '');
