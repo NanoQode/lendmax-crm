@@ -72,8 +72,11 @@ export const INTEGRATION_SPECS: Record<IntegrationKey, IntegrationSpec> = {
     testable: true,
     fields: [
       { name: 'base_url', label: 'Portal URL', type: 'url', required: true,
-        placeholder: 'https://apply.lendmax.ca', envVar: 'PORTAL_BASE_URL',
-        help: 'Used to stream a document back rather than holding a second copy of it.' },
+        placeholder: 'http://127.0.0.1:3200', envVar: 'PORTAL_BASE_URL',
+        help: 'Used to stream a document back rather than holding a second copy of it. Use the ' +
+              'loopback address, not https://apply.lendmax.ca — nginx returns 404 for ' +
+              '/api/internal/ from the internet on both machines, so the public hostname fails ' +
+              'every document fetch. Both sides are on this server.' },
       { name: 'internal_api_key', label: 'Internal API key', secret: true, required: true,
         envVar: 'PORTAL_INTERNAL_API_KEY',
         help: 'The portal’s INTERNAL_API_KEY. Used when the CRM calls the portal.' },

@@ -148,19 +148,49 @@ integrationRoutes.post(
       case 'portal': {
         const resolved = await resolveIntegration(user.organization_id, 'portal');
         const base = String(resolved.values.base_url ?? '');
+        const internalKey = String(resolved.values.internal_api_key ?? '');
         if (!base) { result = { ok: false, message: 'No portal URL is set.' }; break; }
+        if (!internalKey) {
+          result = { ok: false, message: 'No internal API key is set, so the portal cannot be tested.' };
+          break;
+        }
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 10_000);
-          const response = await fetch(`${base.replace(/\/+$/, '')}/api/status`, {
-            signal: controller.signal,
-          }).finally(() => clearTimeout(timer));
+          // Deliberately an endpoint the key guards, not /api/status. Reaching
+          // an unauthenticated endpoint proves the portal is up and nothing
+          // else; a wrong key would still have looked healthy. /api/status is
+          // guarded by the portal's STATUS_API_KEY — a different secret — so
+          // testing against it reported a 401 for a perfectly good key.
+          const response = await fetch(
+            `${base.replace(/\/+$/, '')}/api/internal/applications/count`,
+            { headers: { 'x-internal-key': internalKey }, signal: controller.signal },
+          ).finally(() => clearTimeout(timer));
+
+          if (response.status === 401) {
+            result = {
+              ok: false,
+              message: 'The portal is reachable but rejected the internal API key. It must match ' +
+                'INTERNAL_API_KEY on the portal exactly.',
+            };
+            break;
+          }
+          if (!response.ok) {
+            result = { ok: false, message: `The portal answered HTTP ${response.status}.` };
+            break;
+          }
+          const body = (await response.json().catch(() => null)) as { count?: number } | null;
+          const count = typeof body?.count === 'number' ? body.count : null;
           result = {
-            ok: response.ok,
-            message: response.ok
-              ? `The portal answered (HTTP ${response.status}). Inbound pushes are accepted at ` +
-                `${env.PUBLIC_URL}/api/internal/mirror.`
-              : `The portal answered HTTP ${response.status}.`,
+            ok: true,
+            message:
+              (count === null
+                ? 'The portal accepted the internal API key.'
+                : `The portal accepted the internal API key and reports ${count} application(s).`) +
+              // The public URL is deliberately NOT advertised here: nginx returns
+              // 404 for /crm/api/internal/ from the internet, by design. The
+              // portal is on this machine and pushes over the loopback.
+              ` Inbound pushes are accepted at http://127.0.0.1:${env.PORT}${env.BASE_PATH}/api/internal/mirror.`,
           };
         } catch (err) {
           result = {
