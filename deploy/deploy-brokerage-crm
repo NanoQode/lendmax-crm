@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Finish (or update) the Lendmax brokerage CRM at https://lendmax.ca/crm.
+#
+# Everything except the code is already in place: the database, the role, the
+# secrets in /etc/lendmax/brokerage-crm.env, the storage directory and the
+# systemd unit. This clones or updates the code, installs, migrates, builds
+# the client and starts the service. It does NOT touch nginx — that step is
+# last and separate, because a bad nginx reload takes every site on this box
+# down, not just this one.
+set -euo pipefail
+BRANCH="${1:-claude/cool-euler-u1gmsq}"
+DIR=/srv/lendmax-brokerage-crm
+# node is installed under /root/.hermes; only "node" is symlinked into
+# /usr/local/bin, so npm has to come from the install itself.
+export PATH=/root/.hermes/node/bin:/usr/local/bin:$PATH
+
+if [ -d "$DIR/.git" ]; then
+  echo "==> updating $DIR ($BRANCH)"
+  git -C "$DIR" fetch origin "$BRANCH"
+  git -C "$DIR" checkout "$BRANCH"
+  git -C "$DIR" reset --hard "origin/$BRANCH"
+else
+  echo "==> cloning into $DIR ($BRANCH)"
+  git clone --branch "$BRANCH" https://github.com/NanoQode/lendmax-crm.git "$DIR"
+fi
+
+cd "$DIR"
+echo "==> installing dependencies"
+# The full set, not --omit=dev: esbuild and preact build the client and are
+# devDependencies. Playwright is one too and only drives the smoke test, so
+# its browser download is skipped — it is 300MB this machine has no use for.
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci 2>&1 | tail -3
+
+echo "==> migrating"
+set -a; . /etc/lendmax/brokerage-crm.env; set +a
+node --experimental-strip-types src/db/migrate.ts
+
+echo "==> seeding the vocabularies (idempotent)"
+node --experimental-strip-types scripts/seed.ts
+
+echo "==> building the client"
+NODE_ENV=production node scripts/build-web.mjs
+
+# The client is built; the build-only packages are no longer needed at
+# runtime, and a smaller install is a smaller thing to keep patched.
+echo "==> pruning build-only dependencies"
+npm prune --omit=dev 2>&1 | tail -2
+
+echo "==> starting"
+systemctl enable --now lendmax-brokerage-crm
+sleep 2
+systemctl is-active lendmax-brokerage-crm
+curl -fsS "http://127.0.0.1:${PORT:-3400}${BASE_PATH:-/crm}/api/health" && echo
+
+echo
+echo "Running on 127.0.0.1:${PORT:-3400}. It is NOT yet reachable from the"
+echo "internet — add the nginx location block to make it public:"
+echo "  deploy-brokerage-crm-nginx"

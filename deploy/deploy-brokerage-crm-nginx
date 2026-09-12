@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Route https://lendmax.ca/crm to the brokerage CRM on 3400.
+#
+# Separate from the deploy on purpose: this edits the config that serves every
+# site on this machine, so it takes a backup, tests before reloading, and
+# restores if the test fails. nginx matches the longest prefix, so /crm wins
+# over the site's catch-all regardless of where the block sits.
+set -euo pipefail
+CONF=/etc/nginx/sites-available/lendmax.ca
+BACKUP="/root/nginx-lendmax.ca.$(date +%Y%m%d-%H%M%S).bak"
+
+grep -q "location /crm" "$CONF" && { echo "already routed; nothing to do"; exit 0; }
+curl -fsS http://127.0.0.1:3400/crm/api/health >/dev/null \
+  || { echo "the CRM is not answering on 3400 — start it first"; exit 1; }
+
+cp -a "$CONF" "$BACKUP"
+echo "backup: $BACKUP"
+
+python3 - "$CONF" <<'PYEOF'
+import sys
+path = sys.argv[1]
+conf = open(path).read()
+block = '''
+    # ── The brokerage CRM (lendmax.ca/crm) ────────────────────────────────
+    # Its own process on 3400. nginx matches the longest prefix, so this wins
+    # over the catch-all below whatever the order.
+    #
+    # The same rule as the site's own: /crm/api/internal/ is the channel the
+    # application portal pushes through. It carries applicant data and is
+    # protected only by a shared key, so it must never be reachable from the
+    # internet — the portal reaches it over localhost, bypassing nginx.
+    location /crm/api/internal/ { return 404; }
+
+    location /crm {
+        proxy_pass http://127.0.0.1:3400;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        # Client documents go through here.
+        client_max_body_size 25m;
+    }
+
+'''
+# Insert before the catch-all location / inside the 443 server block. The
+# newline in the marker must be a real one: written as "\\n" in a quoted
+# heredoc it becomes a literal backslash-n and can never match.
+marker = "    location / {\n        proxy_pass http://127.0.0.1:3000;"
+if marker not in conf:
+    sys.exit("could not find the catch-all location; not modifying")
+conf = conf.replace(marker, block + marker, 1)
+open(path, 'w').write(conf)
+print("block inserted")
+PYEOF
+
+# `nginx -t | tail` would report tail's exit status, which is always 0, so a
+# rejected config would never be restored. Capture the output instead.
+if nginx -t > /tmp/nginx-test.out 2>&1; then
+  tail -2 /tmp/nginx-test.out
+  systemctl reload nginx
+  echo "reloaded"
+  # -L because /crm redirects to /crm/; without it this prints the 301.
+  curl -sL -o /dev/null -w "https://lendmax.ca/crm -> %{http_code}\n" https://lendmax.ca/crm
+  curl -s -o /dev/null -w "https://lendmax.ca/ -> %{http_code}  (must stay 200)\n" https://lendmax.ca/
+else
+  tail -5 /tmp/nginx-test.out
+  cp -a "$BACKUP" "$CONF"
+  echo "nginx rejected the config; restored from backup and did NOT reload"
+  exit 1
+fi

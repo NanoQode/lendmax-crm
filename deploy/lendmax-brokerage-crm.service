@@ -1,0 +1,29 @@
+[Unit]
+Description=Lendmax Brokerage CRM — lendmax.ca/crm
+Documentation=https://github.com/NanoQode/lendmax-crm
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/srv/lendmax-brokerage-crm
+EnvironmentFile=/etc/lendmax/brokerage-crm.env
+# Types are stripped at load, not compiled. Node 22 does this natively, which
+# is why there is no build step for the server and no dist/ to go stale.
+ExecStart=/usr/local/bin/node --experimental-strip-types src/server.ts
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lendmax-brokerage-crm
+
+# It needs its own data directory and nothing else on the disk.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/lendmax-brokerage-crm
+
+[Install]
+WantedBy=multi-user.target
