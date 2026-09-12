@@ -164,7 +164,7 @@ export function ClientPage({ id, session, config }: {
         {tab === 'application' && <ApplicationTab data={state.data} />}
         {tab === 'notes' && <NotesTab id={id} session={session} />}
         {tab === 'log' && <LogTab id={id} />}
-        {tab === 'documents' && <DocumentsTab data={state.data} />}
+        {tab === 'documents' && <DocumentsTab data={state.data} id={id} session={session} />}
         {tab === 'compliance' && <ComplianceTab applicationId={id} session={session} />}
         {tab === 'funding' && <FundingTab applicationId={id} session={session} config={config} />}
         {tab === 'automations' && (
@@ -334,43 +334,192 @@ const MiniTable = ({ title, rows, empty }: {
   </div>
 );
 
-function DocumentsTab({ data }: { data: Workspace }) {
-  if (!data.documents.length) {
-    return (
-      <Empty title="No documents on this file">
-        Documents uploaded through the portal appear here, as does anything the brokerage
-        requests. Requesting documents is part of the Documents module, which is not built yet.
-      </Empty>
-    );
-  }
+/**
+ * Documents on one file, and asking for more.
+ *
+ * A request sends the client a link rather than asking them to email
+ * attachments: a mortgage document in a mailbox is a mortgage document in
+ * the wrong place, and the link is short-lived, single-purpose and refuses
+ * anything that is not what it claims to be.
+ */
+function DocumentsTab({ data, id, session }: {
+  data: Workspace; id: string; session: Session;
+}) {
+  const requests = useAsync<{ requests: Array<Record<string, any>> }>(
+    `/applications/${id}/document-requests`, [id]);
+  const [requesting, setRequesting] = useState(false);
+  const canRequest = session.permissions.includes('document.request');
+
   return (
-    <div class="card">
-      <div class="table-wrap">
-        <table class="data">
-          <thead><tr><th>Document</th><th>Category</th><th>Uploaded</th><th>Review</th><th>Scan</th></tr></thead>
-          <tbody>
-            {data.documents.map((d) => (
-              <tr key={d.id} style={{ cursor: 'default' }}>
-                <td data-primary>{d.display_label ?? d.filename}</td>
-                <td data-label="Category">{d.category_key ?? '—'}</td>
-                <td data-label="Uploaded">{relativeTime(d.uploaded_at)}</td>
-                <td data-label="Review">
-                  <Badge tone={d.review_status === 'accepted' ? 'ok'
-                             : d.review_status === 'rejected' ? 'danger' : 'warn'}>
-                    {d.review_status}
-                  </Badge>
-                </td>
-                <td data-label="Scan">
-                  <Badge tone={d.scan_status === 'clean' ? 'ok' : d.scan_status === 'infected' ? 'danger' : 'neutral'}>
-                    {d.scan_status}
-                  </Badge>
-                </td>
-              </tr>
+    <div class="stack">
+      {canRequest && (
+        <div class="row" style={{ gap: 8 }}>
+          <button class="btn btn-primary" onClick={() => setRequesting(true)}>
+            Ask the client for documents
+          </button>
+        </div>
+      )}
+
+      {requests.status === 'ready' && requests.data.requests.length > 0 && (
+        <div class="card">
+          <div class="card-head"><h2>Asked for</h2></div>
+          <div class="card-body-flush">
+            {requests.data.requests.map((r) => (
+              <div key={r.id} class="list-row">
+                <div style={{ minWidth: 0 }}>
+                  <strong>
+                    {(r.items ?? []).map((i: { label: string }) => i.label).join(', ')
+                      || 'No items'}
+                  </strong>
+                  <div class="text-sm text-muted">
+                    Sent {relativeTime(r.created_at)}
+                    {r.requested_by_name ? ` by ${r.requested_by_name}` : ''}
+                    {' · '}
+                    {(r.items ?? []).filter((i: { received_at: string | null }) => i.received_at)
+                      .length} of {(r.items ?? []).length} received
+                    {r.expires_at ? ` · link expires ${formatDate(r.expires_at)}` : ''}
+                  </div>
+                </div>
+                <Badge tone={r.status === 'completed' ? 'ok'
+                  : r.status === 'cancelled' ? 'neutral' : 'warn'}>{r.status}</Badge>
+              </div>
             ))}
-          </tbody>
-        </table>
+          </div>
+        </div>
+      )}
+
+      <div class="card">
+        <div class="card-head">
+          <h2>On file</h2>
+          <span class="text-sm text-muted num">{data.documents.length}</span>
+        </div>
+        {data.documents.length === 0 ? (
+          <Empty title="Nothing yet">
+            Documents uploaded through the portal appear here, as does anything the client
+            sends through a request link.
+          </Empty>
+        ) : (
+          <div class="table-wrap">
+            <table class="data">
+              <thead><tr><th>Document</th><th>Category</th><th>Uploaded</th><th>Review</th><th>Scan</th></tr></thead>
+              <tbody>
+                {data.documents.map((d) => (
+                  <tr key={d.id} style={{ cursor: 'default' }}>
+                    <td data-primary>{d.display_label ?? d.filename}</td>
+                    <td data-label="Category">{d.category_key ?? '—'}</td>
+                    <td data-label="Uploaded">{relativeTime(d.uploaded_at)}</td>
+                    <td data-label="Review">
+                      <Badge tone={d.review_status === 'accepted' ? 'ok'
+                                 : d.review_status === 'rejected' ? 'danger' : 'warn'}>
+                        {d.review_status}
+                      </Badge>
+                    </td>
+                    <td data-label="Scan">
+                      <Badge tone={d.scan_status === 'clean' ? 'ok' : d.scan_status === 'infected' ? 'danger' : 'neutral'}>
+                        {d.scan_status}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
+
+      {requesting && (
+        <RequestDocuments id={id} config={null} onClose={() => setRequesting(false)}
+                          onSent={() => { setRequesting(false); requests.reload(); }} />
+      )}
     </div>
+  );
+}
+
+function RequestDocuments({ id, onClose, onSent }: {
+  id: string; config: unknown; onClose: () => void; onSent: () => void;
+}) {
+  const categories = useAsync<{ document_categories: Array<{ key: string; label: string }> }>(
+    '/config');
+  const [chosen, setChosen] = useState<string[]>([]);
+  const [channel, setChannel] = useState('email');
+  const [message, setMessage] = useState('');
+  const [expires, setExpires] = useState('21');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const available = categories.status === 'ready'
+    ? categories.data.document_categories ?? [] : [];
+
+  const send = async () => {
+    setBusy(true); setError('');
+    try {
+      const result = await post<{ sent: boolean; reason?: string }>(
+        `/applications/${id}/document-requests`, {
+          items: chosen.map((key) => ({
+            category_key: key,
+            label: available.find((c) => c.key === key)?.label ?? key,
+          })),
+          channel, message: message || undefined,
+          expires_in_days: Number(expires),
+        });
+      toast(result.sent === false
+        ? `Request created, but not sent — ${result.reason ?? 'the send was refused'}`
+        : 'Sent. The client has a link.', result.sent === false ? 'info' : 'ok');
+      onSent();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not send that.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="Ask for documents" onClose={onClose} footer={
+      <>
+        <button class="btn" onClick={onClose}>Cancel</button>
+        <button class="btn btn-primary" disabled={busy || chosen.length === 0} onClick={send}>
+          {busy ? 'Sending…' : `Ask for ${chosen.length || 'nothing'}`}
+        </button>
+      </>
+    }>
+      {error && <div class="alert alert-error">{error}</div>}
+      <p class="text-sm text-muted">
+        The client gets a link, not a request to email attachments. It expires, it accepts
+        only the things asked for, and it checks that a file is what it says it is.
+      </p>
+
+      <Field label="What to ask for">
+        <div class="permission-pick permission-list">
+          {available.map((c) => (
+            <label key={c.key} class="check">
+              <input type="checkbox" checked={chosen.includes(c.key)}
+                     onChange={(e) => setChosen((e.target as HTMLInputElement).checked
+                       ? [...chosen, c.key]
+                       : chosen.filter((k) => k !== c.key))} />
+              <span class="text-sm">{c.label}</span>
+            </label>
+          ))}
+        </div>
+      </Field>
+
+      <div class="grid-2">
+        <Field label="How to send it">
+          <select value={channel} onChange={(e) => setChannel((e.target as HTMLSelectElement).value)}>
+            <option value="email">Email</option>
+            <option value="sms">Text</option>
+            <option value="both">Both</option>
+          </select>
+        </Field>
+        <Field label="Link lasts (days)">
+          <input type="number" min={1} max={90} value={expires}
+                 onInput={(e) => setExpires((e.target as HTMLInputElement).value)} />
+        </Field>
+      </div>
+
+      <Field label="Anything to add" hint="Appears above the list in the message.">
+        <textarea rows={3} value={message}
+                  onInput={(e) => setMessage((e.target as HTMLTextAreaElement).value)} />
+      </Field>
+    </Modal>
   );
 }
 
@@ -568,12 +717,3 @@ function MoveStage({ id, current, config, onClose, onMoved }: {
  * Deliberately not a mocked-up panel: a fake Kanban with no persistence behind
  * it is how a product gets signed off and then does not work.
  */
-export function NotBuiltYet({ module }: { module: string }) {
-  return (
-    <Empty title={`${module} is not built yet`}>
-      The database schema and the domain rules for this module are in place; the screen is not.
-      It is listed in the README under what remains, rather than mocked up here — a panel that
-      looks finished and stores nothing is worse than an empty one.
-    </Empty>
-  );
-}

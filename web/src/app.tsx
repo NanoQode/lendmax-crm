@@ -9,7 +9,7 @@ import { Shell } from './components/shell.tsx';
 import { Badge, Empty, ErrorNote, Field, Icon, ICONS, Skeleton } from './components/ui.tsx';
 import { DashboardPage } from './pages/dashboard.tsx';
 import { CustomersPage, PipelinePage } from './pages/customers.tsx';
-import { ClientPage, NotBuiltYet } from './pages/client.tsx';
+import { ClientPage } from './pages/client.tsx';
 import { IntegrationsPage } from './pages/integrations.tsx';
 import { AutomationsPage } from './pages/automations.tsx';
 import { CompliancePage } from './pages/compliance.tsx';
@@ -90,12 +90,6 @@ function Routes({ session, config, onProfileSaved }: {
   }
 }
 
-const ModulePage = ({ title }: { title: string }) => (
-  <div class="content-narrow">
-    <div class="page-head"><h1>{title}</h1></div>
-    <div class="card"><NotBuiltYet module={title} /></div>
-  </div>
-);
 
 // ── Sign in ────────────────────────────────────────────────────────────────
 
