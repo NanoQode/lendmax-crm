@@ -157,10 +157,13 @@ const COMPLIANCE_CHECKLIST = {
 const RISK_FACTORS: Array<[string, string, string, number, string, object]> = [
   ['non_resident',      'Non-resident borrower',        'A borrower without Canadian residency status.', 3, 'applicant_field_in',
     { field: 'citizenship', values: ['Non-resident'] }],
+  // `determined_by` names the field that says the determination was actually
+  // made. Both of these columns default to false, so without it a file nobody
+  // has assessed reads as assessed and clean.
   ['entity_borrower',   'Corporate or entity borrower', 'Beneficial ownership must be established.', 3, 'fintrac_flag',
-    { flag: 'entity_borrower' }],
+    { flag: 'entity_borrower', determined_by: 'completed_at' }],
   ['third_party',       'Third party involved',         'Somebody other than the borrower is party to the transaction.', 3, 'fintrac_flag',
-    { flag: 'third_party_present' }],
+    { flag: 'third_party_present', determined_by: 'third_party_checked' }],
   ['pep',               'Politically exposed person',   'PEP, HIO, family member or close associate.', 4, 'fintrac_pep', {}],
   ['private_lender',    'Private mortgage',             'Private lending carries a higher inherent risk rating.', 2, 'transaction_type_in',
     { values: ['private', 'second_mortgage'] }],
