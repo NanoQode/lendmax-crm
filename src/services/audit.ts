@@ -143,6 +143,13 @@ export type ChainVerification = {
   checked: number;
   /** The first row whose hash does not follow from its predecessor. */
   brokenAt?: { id: string; at: string; action: string; expected: string; found: string };
+  /**
+   * How many rows in total failed. Verification does not stop at the first:
+   * an append-only table cannot have a break repaired, so stopping would let
+   * one permanent break mask every later one — exactly when the chain is most
+   * needed. Every break is found and counted; brokenAt names the earliest.
+   */
+  breaks: number;
 };
 
 export async function verifyChain(
@@ -163,6 +170,8 @@ export async function verifyChain(
 
   let previous: string | null = null;
   let checked = 0;
+  let breaks = 0;
+  let first: ChainVerification['brokenAt'];
   for (const row of rows) {
     const expected = hashRow({
       prevHash: previous,
@@ -177,21 +186,22 @@ export async function verifyChain(
     });
     checked++;
     if (expected !== row.row_hash) {
-      return {
-        ok: false,
-        checked,
-        brokenAt: {
-          id: String(row.id),
-          at: new Date(row.at).toISOString(),
-          action: row.action,
-          expected,
-          found: row.row_hash,
-        },
+      breaks++;
+      first ??= {
+        id: String(row.id),
+        at: new Date(row.at).toISOString(),
+        action: row.action,
+        expected,
+        found: row.row_hash,
       };
     }
+    // Carry the STORED hash forward either way, so one bad row invalidates
+    // itself rather than every row after it.
     previous = row.row_hash;
   }
-  return { ok: true, checked };
+  return breaks === 0
+    ? { ok: true, checked, breaks: 0 }
+    : { ok: false, checked, breaks, brokenAt: first };
 }
 
 /**

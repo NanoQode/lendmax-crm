@@ -127,7 +127,33 @@ test('tampering that goes around the triggers is detected, and located', async (
     const result = await verifyChain(orgId);
     assert.equal(result.ok, false);
     assert.equal(result.brokenAt?.id, victim, 'names the row that was changed');
-    assert.equal(result.checked, 2, 'and stops at the first break');
+    assert.equal(result.breaks, 1, 'and only that row — the rest still follow');
+  } finally {
+    await query('ALTER TABLE audit_log ENABLE TRIGGER audit_log_no_update');
+  }
+});
+
+test('a second, later tamper is still found behind an earlier one', async () => {
+  // The reason verification does not stop at the first break. An append-only
+  // table cannot have a break repaired, so a permanent one at row 2 would
+  // otherwise hide everything after it for the life of the deployment.
+  const { rows } = await query<{ id: string | number }>(
+    'SELECT id FROM audit_log WHERE organization_id = $1 ORDER BY id',
+    [orgId],
+  );
+  const early = String(rows[1]!.id);
+  const late = String(rows[rows.length - 1]!.id);
+  assert.notEqual(early, late, 'needs at least two rows apart to be a real test');
+
+  await query('ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_update');
+  try {
+    await query('UPDATE audit_log SET summary = $2 WHERE id = $1', [early, 'first tamper']);
+    await query('UPDATE audit_log SET summary = $2 WHERE id = $1', [late, 'second tamper']);
+    const result = await verifyChain(orgId);
+    assert.equal(result.ok, false);
+    assert.equal(result.breaks, 2, 'both are reported, not just the earliest');
+    assert.equal(result.brokenAt?.id, early, 'and the earliest is still named');
+    assert.equal(result.checked, rows.length, 'the whole log was examined');
   } finally {
     await query('ALTER TABLE audit_log ENABLE TRIGGER audit_log_no_update');
   }
