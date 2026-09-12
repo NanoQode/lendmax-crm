@@ -14,6 +14,10 @@ import { IntegrationsPage } from './pages/integrations.tsx';
 import { AutomationsPage } from './pages/automations.tsx';
 import { CompliancePage } from './pages/compliance.tsx';
 import { RenewalsPage } from './pages/funding.tsx';
+import { ReportsPage } from './pages/reports.tsx';
+import { CalendarPage } from './pages/calendar.tsx';
+import { CampaignsPage } from './pages/campaigns.tsx';
+import { SettingsAdminPage } from './pages/settings-admin.tsx';
 
 export function App() {
   const { state, reload, signOut } = useSession();
@@ -65,14 +69,14 @@ function Routes({ session, config, onProfileSaved }: {
     case '/tasks': return <TasksPage session={session} />;
     case '/profile': return <ProfilePage session={session} onSaved={onProfileSaved} />;
     case '/integrations': return <IntegrationsPage session={session} />;
-    case '/settings': return <SettingsPage session={session} config={config} />;
+    case '/settings': return <SettingsAdminPage session={session} config={config} />;
     case '/documents': return <ModulePage title="Documents" />;
     case '/automations': return <AutomationsPage session={session} />;
-    case '/campaigns': return <ModulePage title="Campaigns" />;
+    case '/campaigns': return <CampaignsPage session={session} />;
     case '/renewals': return <RenewalsPage session={session} />;
     case '/compliance': return <CompliancePage session={session} />;
-    case '/reports': return <ModulePage title="Reports" />;
-    case '/calendar': return <ModulePage title="Calendar" />;
+    case '/reports': return <ReportsPage session={session} />;
+    case '/calendar': return <CalendarPage session={session} />;
     default:
       return (
         <Empty title="No such page"
@@ -309,103 +313,4 @@ function TasksPage({ session }: { session: Session }) {
 
 // ── Integrations and settings ──────────────────────────────────────────────
 
-function SettingsPage({ session, config }: { session: Session; config: Config | null }) {
-  const [verifying, setVerifying] = useState(false);
-  const [chain, setChain] = useState<string | null>(null);
 
-  const verify = async () => {
-    setVerifying(true);
-    try {
-      const res = await post<{ message: string }>('/audit/verify');
-      setChain(res.message);
-    } catch (err) {
-      setChain(err instanceof Error ? err.message : 'Verification failed.');
-    } finally {
-      setVerifying(false);
-    }
-  };
-
-  return (
-    <div class="content-narrow">
-      <div class="page-head"><div><h1>Settings</h1><p>Configuration this brokerage owns.</p></div></div>
-
-      <div class="stack">
-        <div class="card">
-          <div class="card-head"><h2>Pipeline stages</h2></div>
-          <div class="card-body-flush">
-            <div class="table-wrap">
-              <table class="data">
-                <thead><tr><th>Stage</th><th>Category</th><th>Probability</th><th>Entry rules</th></tr></thead>
-                <tbody>
-                  {config?.stages.map((s) => (
-                    <tr key={s.key} style={{ cursor: 'default' }}>
-                      <td data-primary>
-                        <span class="row" style={{ gap: 7 }}>
-                          <span class="swatch" style={{ width: 8, height: 8, borderRadius: 2,
-                                                        background: s.colour ?? 'var(--grey-400)' }} />
-                          {s.label}
-                        </span>
-                      </td>
-                      <td data-label="Category">{s.category}</td>
-                      <td data-label="Probability" class="num">
-                        {s.probability === null ? 'Not forecast' : `${s.probability}%`}
-                      </td>
-                      <td data-label="Entry rules" class="text-sm text-muted">
-                        {describeRules((s as any).entry_rules)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        {session.permissions.includes('audit.view') && (
-          <div class="card">
-            <div class="card-head"><h2>Audit log</h2></div>
-            <div class="card-body">
-              <p class="text-sm text-muted" style={{ marginTop: 0 }}>
-                Every entry carries the hash of the one before it. The database refuses to update
-                or delete an entry; this check catches anything that went around the database.
-              </p>
-              <button class="btn" onClick={verify} disabled={verifying}>
-                {verifying ? 'Verifying…' : 'Verify the chain'}
-              </button>
-              {chain && (
-                <div class={`alert ${chain.includes('intact') ? 'alert-info' : 'alert-error'}`}
-                     style={{ marginTop: 12, marginBottom: 0 }}>
-                  {chain}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div class="card">
-          <div class="card-head"><h2>Everything else</h2></div>
-          <div class="card-body">
-            <p class="text-sm text-muted" style={{ margin: 0 }}>
-              Users and roles, transaction types, document categories, compliance checklists,
-              consent rules, quiet hours, templates and retention are all stored and served by the
-              API, but only the stages above have an editing screen so far. The README lists what
-              remains.
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function describeRules(rules: Record<string, unknown> | null | undefined): string {
-  if (!rules || Object.keys(rules).length === 0) return 'None';
-  const parts: string[] = [];
-  if (rules.minPercentComplete) parts.push(`at least ${rules.minPercentComplete}% complete`);
-  if (rules.requireAppointment) parts.push('an appointment booked');
-  if (rules.requireScarlettDeal) parts.push('pushed to Scarlett');
-  if (rules.requireLostDisposition) parts.push('a lost reason');
-  if (rules.requireFundingConfirmed) parts.push('funding confirmed');
-  if (rules.requireComplianceComplete) parts.push('compliance complete');
-  return parts.length ? `Needs ${parts.join(', ')}` : 'None';
-}
