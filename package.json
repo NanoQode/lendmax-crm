@@ -15,7 +15,7 @@
     "start": "node --env-file-if-exists=.env dist/server.js",
     "migrate": "node --env-file-if-exists=.env --experimental-strip-types src/db/migrate.ts",
     "seed": "node --env-file-if-exists=.env --experimental-strip-types scripts/seed.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "test:db": "node --env-file-if-exists=.env.test --experimental-strip-types --test --test-concurrency=1 test/db/*.test.ts",
     "verify": "npm run typecheck && npm test && npm run test:db",

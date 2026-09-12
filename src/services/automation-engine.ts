@@ -213,6 +213,9 @@ export async function sweepDueEnrollments(
        FROM automation_enrollments e
       WHERE e.organization_id = $1 AND e.status = 'active'
         AND e.next_run_at IS NOT NULL AND e.next_run_at <= now()
+        -- A claimed enrollment is being worked on right now; only an
+        -- abandoned claim counts as missing.
+        AND (e.running_since IS NULL OR e.running_since < now() - interval '${CLAIM_TIMEOUT}')
         AND NOT EXISTS (
           SELECT 1 FROM jobs j
            WHERE j.kind = 'automation.step'
@@ -292,16 +295,64 @@ export type StepOutcome = {
   reason?: string;
 };
 
+/**
+ * How long a claim is honoured before another worker may take the step over.
+ *
+ * Long enough that no real step is still running, short enough that a worker
+ * killed mid-step does not strand the client for an afternoon.
+ */
+const CLAIM_TIMEOUT = "5 minutes";
+
 export async function runStep(enrollmentId: string): Promise<StepOutcome> {
+  // Claim the step before reading anything else. Two jobs can exist for one
+  // enrollment — a scheduled step and somebody pressing "run this now" — and
+  // without this they both advance it, which duplicates a task or steps over
+  // a node entirely. (A duplicate SEND was already impossible: every message
+  // carries a dedupe key of enrollment plus node.)
   const enrollment = await queryOne<{
     id: string; organization_id: string; automation_id: string; automation_version: number;
     customer_id: string; application_id: string | null; status: string;
     current_node_key: string | null; steps_completed: number; messages_sent: number;
   }>(
-    `SELECT * FROM automation_enrollments WHERE id = $1`, [enrollmentId],
+    `UPDATE automation_enrollments
+        SET running_since = now()
+      WHERE id = $1 AND status = 'active'
+        AND (running_since IS NULL OR running_since < now() - interval '${CLAIM_TIMEOUT}')
+      RETURNING *`,
+    [enrollmentId],
   );
-  if (!enrollment) return { status: 'failed', reason: 'No such enrollment.' };
-  if (enrollment.status !== 'active') return { status: 'stopped', reason: `Already ${enrollment.status}.` };
+  if (!enrollment) {
+    // Either it is gone, it is not active, or another worker has it. Say
+    // which, because "skipped" in a log with no reason is a mystery.
+    const existing = await queryOne<{ status: string; running_since: string | null }>(
+      'SELECT status, running_since FROM automation_enrollments WHERE id = $1', [enrollmentId]);
+    if (!existing) return { status: 'failed', reason: 'No such enrollment.' };
+    if (existing.running_since) {
+      return { status: 'waiting', reason: 'Another worker is running this step.' };
+    }
+    return { status: 'stopped', reason: `Already ${existing.status}.` };
+  }
+
+  try {
+    return await runClaimedStep(enrollment);
+  } finally {
+    // Released whatever happened, including a throw: a claim left behind
+    // blocks the enrollment until the reclaim window expires, which turns one
+    // failed step into five minutes of silence.
+    await query(
+      'UPDATE automation_enrollments SET running_since = NULL WHERE id = $1',
+      [enrollmentId]);
+  }
+}
+
+type ClaimedEnrollment = {
+  id: string; organization_id: string; automation_id: string; automation_version: number;
+  customer_id: string; application_id: string | null; status: string;
+  current_node_key: string | null; steps_completed: number; messages_sent: number;
+};
+
+async function runClaimedStep(enrollment: ClaimedEnrollment): Promise<StepOutcome> {
+  const enrollmentId = enrollment.id;
 
   const versionRow = await queryOne<{ definition: unknown; purpose: string; name: string; key: string }>(
     `SELECT v.definition, a.purpose, a.name, a.key
@@ -409,7 +460,14 @@ async function executeNode(node: AutomationNode, ctx: ExecuteContext): Promise<E
         const { quiet, timezone } = await quietHoursFor(ctx.organizationId);
         runAt = nextSendableTime(runAt, timezone, quiet);
       }
-      await recordExecution(ctx.enrollmentId, node, 'waiting', `Until ${runAt.toISOString()}`);
+      const { timezone } = await quietHoursFor(ctx.organizationId);
+      await recordExecution(
+        ctx.enrollmentId, node, 'waiting',
+        `Until ${runAt.toLocaleString('en-CA', {
+          timeZone: timezone, day: 'numeric', month: 'long',
+          hour: 'numeric', minute: '2-digit',
+        })}`,
+      );
       return { kind: 'wait', nextKey: node.next ?? null, runAt };
     }
 

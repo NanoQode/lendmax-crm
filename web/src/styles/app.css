@@ -547,6 +547,143 @@ table.data tbody tr:last-child td { border-bottom: 0; }
 
 .mobile-nav { display: none; }
 
+/* ── Automations ─────────────────────────────────────────────────────────
+   The builder reads top to bottom in the order the steps happen. A canvas
+   would look more like a diagram and be worse at the job: these sequences
+   are a line with the occasional fork, they are read far more often than
+   they are rearranged, and a canvas is unusable on a phone. */
+
+.section-heading {
+  font-size: 12px; font-weight: 620; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); margin: 18px 0 8px;
+}
+.sub-heading { font-size: 13.5px; font-weight: 620; margin: 16px 0 2px; }
+.stack-tight { display: flex; flex-direction: column; gap: 8px; }
+.d-block { display: block; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+
+.flow-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  width: 100%; text-align: left; padding: 13px 16px; cursor: pointer;
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-sm); color: inherit;
+  font: inherit;
+}
+.flow-row:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.flow-row-main { min-width: 0; }
+.flow-row-stats {
+  display: flex; gap: 16px; flex-wrap: wrap; justify-content: flex-end;
+  font-size: 12px; color: var(--text-muted); flex: 0 0 auto;
+}
+.flow-row-stats strong { color: var(--text); font-weight: 620; }
+
+.builder { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
+.builder-flow { display: flex; flex-direction: column; min-width: 0; }
+.builder-side { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 14px; }
+
+.step-card {
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden;
+}
+.step-card.step-open { border-color: var(--border-strong); box-shadow: var(--shadow-md); }
+.step-trigger { border-left: 3px solid var(--accent); }
+.step-head {
+  display: flex; align-items: center; gap: 11px; width: 100%; padding: 11px 14px;
+  background: none; border: 0; cursor: pointer; text-align: left; color: inherit;
+  font: inherit;
+}
+.step-head:hover { background: var(--bg-hover); }
+.step-type {
+  flex: 0 0 auto; font-size: 11px; font-weight: 620; padding: 3px 8px;
+  border-radius: 100px; background: var(--neutral-surface); color: var(--neutral-text);
+  white-space: nowrap;
+}
+.step-trigger-type { background: var(--accent-soft); color: var(--accent); }
+.step-send_email, .step-send_sms { background: var(--info-surface); color: var(--info-text); }
+.step-wait { background: var(--warn-surface); color: var(--warn-text); }
+.step-stop { background: var(--danger-surface); color: var(--danger-text); }
+.step-summary {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 13.5px;
+}
+.step-chevron { flex: 0 0 auto; color: var(--text-subtle); }
+.step-body { padding: 4px 14px 14px; border-top: 1px solid var(--border); }
+
+/* The connector is where a step is added, because that is where it goes. */
+.connector { display: flex; align-items: center; gap: 8px; padding: 4px 0 4px 22px; min-height: 30px; }
+.connector-line { width: 2px; align-self: stretch; background: var(--border-strong); flex: 0 0 2px; }
+.connector-add {
+  background: none; border: 1px dashed var(--border-strong); color: var(--text-muted);
+  border-radius: 100px; padding: 3px 11px; font-size: 12px; cursor: pointer; font: inherit;
+  font-size: 12px;
+}
+.connector-add:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.connector-menu { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 0; }
+.connector-choice {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 100px;
+  padding: 4px 11px; font-size: 12px; cursor: pointer; color: inherit; font-family: inherit;
+}
+.connector-choice:hover { border-color: var(--accent); color: var(--accent); }
+.connector-cancel { color: var(--text-muted); border-style: dashed; }
+
+.branch-label {
+  font-size: 11px; font-weight: 620; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); padding: 6px 0 4px 6px;
+}
+.branch-orphan { color: var(--warn-text); }
+
+.condition-row { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+.condition-row select, .condition-row input { flex: 1 1 120px; min-width: 0; }
+.stop-row {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; background: var(--bg-sunken);
+}
+
+.preview {
+  margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 11px 13px; background: var(--bg-sunken);
+}
+.preview-subject { font-weight: 620; margin: 8px 0 4px; }
+.preview-body {
+  white-space: pre-wrap; font-family: var(--font); font-size: 13px; margin: 0;
+  color: var(--text); line-height: 1.55;
+}
+
+.merge-grid { display: grid; gap: 9px; margin-top: 10px; }
+.merge-grid code { font-size: 12px; color: var(--accent); }
+
+.list-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 11px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap;
+}
+.list-row:last-child { border-bottom: 0; }
+.link-button {
+  background: none; border: 0; padding: 0; font: inherit; font-weight: 600;
+  color: var(--accent); cursor: pointer; text-align: left;
+}
+.link-button:hover { text-decoration: underline; }
+
+.check { display: flex; gap: 9px; align-items: flex-start; margin: 8px 0; cursor: pointer; }
+.check input { margin-top: 2px; flex: 0 0 auto; }
+
+.enrollment-now { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.step-log { border-top: 1px solid var(--border); }
+.step-log-row {
+  display: grid; grid-template-columns: 88px minmax(0, 1fr) auto; gap: 12px;
+  align-items: start; padding: 9px 16px; border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.step-log-row:last-child { border-bottom: 0; }
+.step-outcome {
+  font-size: 10.5px; font-weight: 620; text-transform: uppercase; letter-spacing: 0.03em;
+  padding: 2px 7px; border-radius: 100px; text-align: center;
+  background: var(--neutral-surface); color: var(--neutral-text);
+}
+.outcome-executed { background: var(--ok-surface); color: var(--ok-text); }
+.outcome-failed { background: var(--danger-surface); color: var(--danger-text); }
+.outcome-suppressed, .outcome-skipped { background: var(--warn-surface); color: var(--warn-text); }
+.outcome-waiting, .outcome-branched { background: var(--info-surface); color: var(--info-text); }
+
 @media (max-width: 860px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }
@@ -603,4 +740,15 @@ table.data tbody tr:last-child td { border-bottom: 0; }
     padding-left: 14px; padding-right: 14px;
     border-top: 1px solid var(--border); z-index: 20;
   }
+
+  /* The builder stacks: the stop conditions matter more than the canvas
+     metaphor, so they go under the flow rather than off the side. */
+  .builder { grid-template-columns: 1fr; }
+  .builder-side { position: static; }
+  .grid-3 { grid-template-columns: 1fr; }
+  .enrollment-now { grid-template-columns: 1fr; }
+  .flow-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .flow-row-stats { justify-content: flex-start; }
+  .step-log-row { grid-template-columns: 1fr; gap: 4px; }
+  .step-outcome { justify-self: start; }
 }

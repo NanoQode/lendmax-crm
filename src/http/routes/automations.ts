@@ -194,7 +194,18 @@ automationRoutes.get(
   asyncRoute(async (req, res) => {
     const user = req.user!;
     const automation = await queryOne(
-      `SELECT * FROM automations WHERE id = $1 AND organization_id = $2`,
+      `SELECT a.*,
+              COALESCE(e.active, 0) AS active_enrollments,
+              COALESCE(e.completed, 0) AS completed_enrollments,
+              COALESCE(e.stopped, 0) AS stopped_enrollments
+         FROM automations a
+         LEFT JOIN LATERAL (
+           SELECT count(*) FILTER (WHERE status = 'active')::int AS active,
+                  count(*) FILTER (WHERE status = 'completed')::int AS completed,
+                  count(*) FILTER (WHERE status = 'stopped')::int AS stopped
+             FROM automation_enrollments en WHERE en.automation_id = a.id
+         ) e ON TRUE
+        WHERE a.id = $1 AND a.organization_id = $2`,
       [req.params.id, user.organization_id],
     );
     if (!automation) throw notFound('That automation');
@@ -635,7 +646,22 @@ automationRoutes.get(
           current_step_label: current
             ? current.label ?? describeNode(current)
             : null,
-          steps: executions.filter((x) => x.enrollment_id === row.id),
+          // Each step carries the label a person reads, not the internal
+          // key. "a (send_email)" is meaningless to the broker on the phone
+          // to the client asking why they got that email.
+          steps: executions
+            .filter((x) => x.enrollment_id === row.id)
+            .map((x) => {
+              const step = definition
+                ? nodeByKey(definition, x.node_key as string)
+                : null;
+              return {
+                ...x,
+                label: step
+                  ? step.label ?? describeNode(step as never)
+                  : String(x.node_key),
+              };
+            }),
         };
       }),
     });

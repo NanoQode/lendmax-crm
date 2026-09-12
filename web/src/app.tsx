@@ -11,6 +11,7 @@ import { DashboardPage } from './pages/dashboard.tsx';
 import { CustomersPage, PipelinePage } from './pages/customers.tsx';
 import { ClientPage, NotBuiltYet } from './pages/client.tsx';
 import { IntegrationsPage } from './pages/integrations.tsx';
+import { AutomationsPage } from './pages/automations.tsx';
 
 export function App() {
   const { state, reload, signOut } = useSession();
@@ -64,7 +65,7 @@ function Routes({ session, config, onProfileSaved }: {
     case '/integrations': return <IntegrationsPage session={session} />;
     case '/settings': return <SettingsPage session={session} config={config} />;
     case '/documents': return <ModulePage title="Documents" />;
-    case '/automations': return <ModulePage title="Automations" />;
+    case '/automations': return <AutomationsPage session={session} />;
     case '/campaigns': return <ModulePage title="Campaigns" />;
     case '/renewals': return <ModulePage title="Renewals" />;
     case '/compliance': return <ModulePage title="Compliance" />;

@@ -367,3 +367,59 @@ test('a future step is left alone by the sweeper', async () => {
     [enrollmentId]);
   assert.equal((await sweepDueEnrollments(orgId)).requeued, 0);
 });
+
+test('two workers cannot advance one enrollment at the same time', async () => {
+  // Found in a real automation log: the same wait step recorded twice, three
+  // milliseconds apart, because a manual "run this now" landed alongside the
+  // scheduled job.
+  const automation = await publish('concurrent', DefinitionSchema.parse({
+    trigger: { type: 'manual', filters: [] },
+    entry_conditions: [], stop_conditions: [],
+    start_node: 'note',
+    nodes: [
+      { key: 'note', type: 'add_note', body: 'Only once', next: 'end' },
+      { key: 'end', type: 'stop' },
+    ],
+  }));
+  const enrollmentId = await enrol(automation as never, orgId, customerId, applicationId, 'test');
+
+  const [a, b] = await Promise.all([runStep(enrollmentId!), runStep(enrollmentId!)]);
+  const outcomes = [a.status, b.status].sort();
+  assert.deepEqual(outcomes, ['advanced', 'waiting'], `got ${JSON.stringify([a, b])}`);
+
+  const notes = await queryOne<{ n: number }>(
+    `SELECT count(*)::int AS n FROM notes WHERE application_id = $1`, [applicationId]);
+  assert.equal(notes!.n, 1, 'the note was written once, not twice');
+
+  const executions = await queryOne<{ n: number }>(
+    `SELECT count(*)::int AS n FROM automation_executions
+      WHERE enrollment_id = $1 AND node_key = 'note'`, [enrollmentId]);
+  assert.equal(executions!.n, 1);
+});
+
+test('the claim is released even when a step throws', async () => {
+  // A category the tasks table's CHECK constraint refuses, so the step fails
+  // inside the database rather than by anything this test arranges.
+  const automation = await publish('thrower', DefinitionSchema.parse({
+    trigger: { type: 'manual', filters: [] },
+    entry_conditions: [], stop_conditions: [],
+    start_node: 'bad',
+    nodes: [
+      { key: 'bad', type: 'create_task', title: 'Doomed',
+        category: 'not_a_real_category', assign_to: 'broker', next: 'end' },
+      { key: 'end', type: 'stop' },
+    ],
+  }));
+  const enrollmentId = await enrol(automation as never, orgId, customerId, applicationId, 'test');
+
+  await assert.rejects(() => runStep(enrollmentId!), 'the step really did fail');
+
+  const row = await queryOne<{ running_since: string | null; last_error: string }>(
+    'SELECT running_since, last_error FROM automation_enrollments WHERE id = $1', [enrollmentId]);
+  assert.equal(row!.running_since, null,
+    'a claim left behind blocks the enrollment until the reclaim window expires');
+  assert.ok(row!.last_error, 'and the failure is recorded where somebody will see it');
+
+  // The next attempt is not locked out by the claim the failure left.
+  await assert.rejects(() => runStep(enrollmentId!));
+});

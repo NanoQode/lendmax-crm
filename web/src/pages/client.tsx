@@ -13,6 +13,7 @@ import { navigate, toast, useAsync, type Config, type Session } from '../lib/sto
 import {
   Avatar, Badge, Empty, ErrorNote, Field, Icon, ICONS, Modal, Skeleton, Urgency,
 } from '../components/ui.tsx';
+import { ClientAutomations } from './automations.tsx';
 
 type Workspace = {
   application: Record<string, any>;
@@ -155,9 +156,10 @@ export function ClientPage({ id, session, config }: {
         {tab === 'log' && <LogTab id={id} />}
         {tab === 'documents' && <DocumentsTab data={state.data} />}
         {tab === 'compliance' && <ComplianceTab data={state.data} />}
-        {(tab === 'communication' || tab === 'automations') && (
-          <NotBuiltYet module={tab === 'communication' ? 'Communication' : 'Active automations'} />
+        {tab === 'automations' && (
+          <ClientAutomations customerId={String(app.customer_id)} session={session} />
         )}
+        {tab === 'communication' && <NotBuiltYet module="Communication" />}
       </div>
 
       {movingStage && (

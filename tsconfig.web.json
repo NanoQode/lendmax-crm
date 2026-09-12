@@ -1,0 +1,24 @@
+{
+  // The web build is esbuild, which strips types without checking them — so
+  // without this file nothing ever type-checks the front end, and a renamed
+  // API field is found by a blank panel in the browser instead of by the
+  // build. Kept separate from the server config because the DOM, JSX and
+  // bundler resolution apply here and nowhere else.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true
+  },
+  "include": ["web/src/**/*.ts", "web/src/**/*.tsx"]
+}

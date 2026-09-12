@@ -287,6 +287,8 @@ function CommandPalette({ config, permissions, onClose }: {
       { id: 'go-pipe', label: 'Go to Pipeline', hint: 'Navigate', permission: 'customer.view', run: () => navigate('/pipeline') },
       { id: 'go-tasks', label: 'Go to Tasks', hint: 'Navigate', permission: 'task.view', run: () => navigate('/tasks') },
       { id: 'new-cust', label: 'New customer', hint: 'Create', permission: 'customer.create', run: () => navigate('/customers?new=1') },
+      { id: 'go-auto', label: 'Go to Automations', hint: 'Navigate', permission: 'automation.view', run: () => navigate('/automations') },
+      { id: 'new-auto', label: 'New automation', hint: 'Create', permission: 'automation.edit', run: () => navigate('/automations?new=1') },
       { id: 'go-compliance', label: 'Go to Compliance', hint: 'Navigate', permission: 'compliance.view', run: () => navigate('/compliance') },
       { id: 'go-settings', label: 'Go to Settings', hint: 'Navigate', permission: 'settings.view', run: () => navigate('/settings') },
     ];

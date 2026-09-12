@@ -366,9 +366,24 @@ customerRoutes.get(
             [id],
           ),
           query(
-            `SELECT id, street, city, province, occupancy, value, rental_income,
-                    has_mortgage, mtg_lender, mtg_balance, mtg_payment, mtg_maturity, to_be_sold
-               FROM application_properties WHERE application_id = $1 ORDER BY position`,
+            // The flat mtg_* columns were replaced by application_mortgages in
+            // 0011, because a property can carry a second and third charge and
+            // the portal has always allowed that. The charges come back nested
+            // under the property they sit on, in the order they were entered.
+            `SELECT p.id, p.street, p.city, p.province, p.occupancy, p.value,
+                    p.rental_income, p.has_mortgage, p.to_be_sold,
+                    COALESCE(m.charges, '[]'::jsonb) AS mortgages
+               FROM application_properties p
+               LEFT JOIN LATERAL (
+                 SELECT jsonb_agg(jsonb_build_object(
+                          'id', am.id, 'position', am.position, 'loan_type', am.loan_type,
+                          'lender', am.lender, 'balance', am.balance, 'rate', am.rate,
+                          'rate_type', am.rate_type, 'term', am.term, 'maturity', am.maturity,
+                          'payment', am.payment, 'frequency', am.frequency)
+                          ORDER BY am.seq) AS charges
+                   FROM application_mortgages am WHERE am.property_id = p.id
+               ) m ON TRUE
+              WHERE p.application_id = $1 ORDER BY p.position`,
             [id],
           ),
         ])

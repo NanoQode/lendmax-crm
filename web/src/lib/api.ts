@@ -22,6 +22,15 @@ export class ApiError extends Error {
   fields?: Array<{ field: string; message: string }>;
   blockers?: Array<{ field: string; label: string; message: string }>;
   correlationId?: string;
+  /**
+   * The server's `detail`, and the whole body behind it.
+   *
+   * A refusal that lists what is wrong is only useful if the list survives
+   * the throw — the publish route returns every validation issue in `detail`
+   * and the screen shows them next to the steps they belong to.
+   */
+  detail?: unknown;
+  body: Record<string, unknown>;
 
   constructor(message: string, status: number, code: string, extra: Record<string, unknown> = {}) {
     super(message);
@@ -31,6 +40,8 @@ export class ApiError extends Error {
     this.fields = extra.fields as ApiError['fields'];
     this.blockers = extra.blockers as ApiError['blockers'];
     this.correlationId = extra.correlationId as string | undefined;
+    this.detail = extra.detail;
+    this.body = extra;
   }
 }
 
