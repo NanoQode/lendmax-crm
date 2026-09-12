@@ -19,9 +19,9 @@
  */
 import { chromium } from 'playwright';
 
-const PAGES = ['/', '/customers', '/pipeline', '/tasks', '/calendar', '/documents',
-               '/automations', '/campaigns', '/renewals', '/compliance', '/reports',
-               '/integrations', '/settings'];
+const PAGES = ['/', '/customers', '/pipeline', '/tasks', '/calendar', '/messages',
+               '/documents', '/automations', '/campaigns', '/renewals', '/compliance',
+               '/reports', '/integrations', '/settings'];
 const ROLES = [
   ['broker@lendmax.ca', 'manager'],
   ['compliance@lendmax.ca', 'compliance manager'],

@@ -27,7 +27,8 @@ commission and renewals; campaigns with the full consent arithmetic; reports
 built on recorded history; the calendar; and the administration screens.
 
 **Not built:** Google Calendar sync, S3 storage, virus scanning, the retention
-runner, campaign attribution, inbound email, and the AI suitability draft.
+runner, campaign attribution, inbound email ingestion, and the AI suitability
+draft.
 Section 8 lists each one and why it is where it is.
 
 Where a module is not built, the interface says so in the place it would
@@ -366,9 +367,9 @@ left is genuinely left — each line is real work, not a stub to fill in.
    yet. The reporting reads it and correctly shows zero; the job that
    attributes an application or a funding back to a campaign that preceded it
    is not written.
-7. **Inbound email** — outbound email works through four drivers. Replies are
-   not ingested, so a client replying to a CRM email reaches the broker's own
-   inbox rather than the file.
+7. **Inbound email** — outbound email works through four drivers and inbound
+   SMS is ingested and matched. Email replies are not, so a client replying to
+   a CRM email reaches the broker's own inbox rather than the file.
 8. **The suitability AI draft** — the schema and the screen record that a
    draft was AI-assisted and that a named person adopted it. Nothing generates
    the draft, and nothing will until the prompt is built to send the minimum

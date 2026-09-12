@@ -30,6 +30,7 @@ import { campaignRoutes } from './routes/campaigns.ts';
 import { reportRoutes } from './routes/reports.ts';
 import { calendarRoutes } from './routes/calendar.ts';
 import { settingsRoutes } from './routes/settings.ts';
+import { messageRoutes } from './routes/messages.ts';
 import { integrationRoutes } from './routes/integrations.ts';
 import { documentRoutes } from './routes/documents.ts';
 import { publicRoutes } from './routes/public.ts';
@@ -145,6 +146,7 @@ export function createApp(): Express {
   api.use('/', reportRoutes);
   api.use('/', calendarRoutes);
   api.use('/', settingsRoutes);
+  api.use('/', messageRoutes);
   api.use('/', integrationRoutes);
   api.use('/', documentRoutes);
 

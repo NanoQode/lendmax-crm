@@ -18,6 +18,8 @@ import { ReportsPage } from './pages/reports.tsx';
 import { CalendarPage } from './pages/calendar.tsx';
 import { CampaignsPage } from './pages/campaigns.tsx';
 import { SettingsAdminPage } from './pages/settings-admin.tsx';
+import { DocumentsPage } from './pages/documents.tsx';
+import { MessagesPage } from './pages/messages.tsx';
 
 export function App() {
   const { state, reload, signOut } = useSession();
@@ -70,7 +72,8 @@ function Routes({ session, config, onProfileSaved }: {
     case '/profile': return <ProfilePage session={session} onSaved={onProfileSaved} />;
     case '/integrations': return <IntegrationsPage session={session} />;
     case '/settings': return <SettingsAdminPage session={session} config={config} />;
-    case '/documents': return <ModulePage title="Documents" />;
+    case '/documents': return <DocumentsPage session={session} />;
+    case '/messages': return <MessagesPage session={session} />;
     case '/automations': return <AutomationsPage session={session} />;
     case '/campaigns': return <CampaignsPage session={session} />;
     case '/renewals': return <RenewalsPage session={session} />;

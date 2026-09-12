@@ -20,6 +20,7 @@ const NAV: Array<{ section?: string; items: NavEntry[] }> = [
   {
     section: 'Work',
     items: [
+      { path: '/messages', label: 'Messages', icon: ICONS.messages, permission: 'message.view', mobile: true },
       { path: '/documents', label: 'Documents', icon: ICONS.documents, permission: 'document.view' },
       { path: '/automations', label: 'Automations', icon: ICONS.automations, permission: 'automation.view' },
       { path: '/campaigns', label: 'Campaigns', icon: ICONS.campaigns, permission: 'campaign.view' },
@@ -287,6 +288,9 @@ function CommandPalette({ config, permissions, onClose }: {
       { id: 'go-pipe', label: 'Go to Pipeline', hint: 'Navigate', permission: 'customer.view', run: () => navigate('/pipeline') },
       { id: 'go-tasks', label: 'Go to Tasks', hint: 'Navigate', permission: 'task.view', run: () => navigate('/tasks') },
       { id: 'new-cust', label: 'New customer', hint: 'Create', permission: 'customer.create', run: () => navigate('/customers?new=1') },
+      { id: 'go-messages', label: 'Go to Messages', hint: 'Navigate', permission: 'message.view', run: () => navigate('/messages') },
+      { id: 'go-docs', label: 'Go to Documents', hint: 'Navigate', permission: 'document.view', run: () => navigate('/documents') },
+      { id: 'go-reports', label: 'Go to Reports', hint: 'Navigate', permission: 'report.view', run: () => navigate('/reports') },
       { id: 'go-auto', label: 'Go to Automations', hint: 'Navigate', permission: 'automation.view', run: () => navigate('/automations') },
       { id: 'new-auto', label: 'New automation', hint: 'Create', permission: 'automation.edit', run: () => navigate('/automations?new=1') },
       { id: 'go-compliance', label: 'Go to Compliance', hint: 'Navigate', permission: 'compliance.view', run: () => navigate('/compliance') },

@@ -15,6 +15,7 @@ import {
 } from '../components/ui.tsx';
 import { ClientAutomations } from './automations.tsx';
 import { ComplianceTab } from './compliance.tsx';
+import { CommunicationTab } from './messages.tsx';
 import { FundingTab } from './funding.tsx';
 
 type Workspace = {
@@ -133,10 +134,15 @@ export function ClientPage({ id, session, config }: {
         </div>
 
         <div class="client-actions">
-          <a class="btn" href={app.email ? `mailto:${app.email}` : undefined}
-             aria-disabled={!app.email}>Email</a>
-          <a class="btn" href={app.phone_e164 ? `sms:${app.phone_e164}` : undefined}
-             aria-disabled={!app.phone_e164}>Text</a>
+          {/* Email and Text open the CRM's own composer. A mailto: link opens
+              the broker's mail client, which goes around the consent gate and
+              records nothing on the file — both of which matter more than the
+              one click it saves. A phone call is not an electronic message, so
+              Call stays a tel: link. */}
+          <button class="btn" disabled={!app.email}
+                  onClick={() => setTab('communication')}>Email</button>
+          <button class="btn" disabled={!app.phone_e164}
+                  onClick={() => setTab('communication')}>Text</button>
           <a class="btn" href={app.phone_e164 ? `tel:${app.phone_e164}` : undefined}
              aria-disabled={!app.phone_e164}>Call</a>
           {session.permissions.includes('pipeline.move') && (
@@ -164,7 +170,10 @@ export function ClientPage({ id, session, config }: {
         {tab === 'automations' && (
           <ClientAutomations customerId={String(app.customer_id)} session={session} />
         )}
-        {tab === 'communication' && <NotBuiltYet module="Communication" />}
+        {tab === 'communication' && (
+          <CommunicationTab customerId={String(app.customer_id)} applicationId={id}
+                            session={session} />
+        )}
       </div>
 
       {movingStage && (
