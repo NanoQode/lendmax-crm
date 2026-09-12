@@ -1,6 +1,13 @@
 node_modules/
 dist/
+# Everything scripts/build-web.mjs writes. All three come out of the same
+# step, and tracking two of them while ignoring the third left a committed
+# index.html pointing at asset hashes that did not exist in a fresh clone —
+# and a committed csp-hashes.json that the server reads at boot, so a stale
+# one silently blocks the inline theme script.
 web/public/assets/
+web/public/index.html
+web/public/csp-hashes.json
 *.log
 .env
 .env.*
