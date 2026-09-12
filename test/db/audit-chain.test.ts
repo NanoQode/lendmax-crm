@@ -59,6 +59,42 @@ test('a chain of entries verifies, including multi-key payloads', async () => {
   assert.equal(result.checked, 3);
 });
 
+test('a null payload does not break the chain', async () => {
+  // The shape that broke it in production: a first-time profile save reads the
+  // previous row with queryOne, which returns null — not undefined — when there
+  // is nothing there yet. `before: null` then hashed as the string "null" on
+  // write and as "" on verify, because a jsonb JSON-null and a SQL NULL are the
+  // same JS null coming back out of the driver. Every entry with a null payload
+  // reported itself as tampering.
+  await recordAudit({
+    organizationId: orgId,
+    actor: { name: 'Tester', kind: 'user' },
+    action: 'test.null_before',
+    summary: 'Nothing existed before this',
+    before: null,
+    after: { display_name: 'Someone', title: null },
+  });
+  await recordAudit({
+    organizationId: orgId,
+    actor: { name: 'Tester', kind: 'user' },
+    action: 'test.null_after',
+    summary: 'And nothing after',
+    before: { display_name: 'Someone' },
+    after: null,
+  });
+  await recordAudit({
+    organizationId: orgId,
+    actor: { name: 'Tester', kind: 'user' },
+    action: 'test.both_null',
+    summary: 'Neither side carries a payload',
+    before: null,
+    after: null,
+  });
+
+  const result = await verifyChain(orgId);
+  assert.equal(result.ok, true, JSON.stringify(result.brokenAt));
+});
+
 test('the database refuses to update an audit row', async () => {
   await assert.rejects(
     () => query(`UPDATE audit_log SET summary = 'rewritten' WHERE organization_id = $1`, [orgId]),

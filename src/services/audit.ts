@@ -99,8 +99,16 @@ export async function recordAudit(
   const at = new Date().toISOString();
   // Canonical for the hash; the same string is what gets stored, so the value
   // in the column and the value that was hashed are the same document.
-  const before = entry.before === undefined ? null : canonicalJson(entry.before);
-  const after = entry.after === undefined ? null : canonicalJson(entry.after);
+  //
+  // null collapses to SQL NULL rather than to the JSON document `null`. Both
+  // come back out of the driver as JS null and are indistinguishable on the
+  // verify side, so storing the JSON one hashed "null" at write time and ""
+  // at verify time and broke the chain. A null payload carries no information
+  // either way, so the two are genuinely the same thing.
+  const before = entry.before === undefined || entry.before === null
+    ? null : canonicalJson(entry.before);
+  const after = entry.after === undefined || entry.after === null
+    ? null : canonicalJson(entry.after);
   const rowHash = hashRow({
     prevHash,
     at,

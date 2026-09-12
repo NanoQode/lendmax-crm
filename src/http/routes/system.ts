@@ -9,8 +9,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { query, queryOne, healthcheck } from '../../db/pool.ts';
-import { describeIntegrations, env } from '../../config/env.ts';
+import { env } from '../../config/env.ts';
 import { verifyChain } from '../../services/audit.ts';
+import {
+  INTEGRATION_KEYS, INTEGRATION_SPECS, resolveIntegration,
+} from '../../services/integrations.ts';
 import { recordAudit } from '../../services/audit.ts';
 import { ROLES, ROLE_IDS, PERMISSIONS } from '../../domain/permissions.ts';
 import { asyncRoute, notFound } from '../middleware/errors.ts';
@@ -85,10 +88,31 @@ systemRoutes.get(
 
     const jobsByState = Object.fromEntries(jobs.rows.map((r) => [r.state, r.count]));
 
+    // Resolved, not read from the environment. describeIntegrations() only ever
+    // saw env vars, so an integration configured on the Integrations screen —
+    // the documented way to configure one — reported itself unconfigured here,
+    // while its own connection test passed against the same credentials.
+    const integrationStatus = await Promise.all(
+      INTEGRATION_KEYS.map(async (key) => {
+        const resolved = await resolveIntegration(user.organization_id, key);
+        return {
+          id: key,
+          name: INTEGRATION_SPECS[key].name,
+          configured: resolved.configured,
+          enabled: resolved.enabled,
+          missing: resolved.missing,
+          // Where each value came from, so "configured" is explainable rather
+          // than a bare boolean an admin has to take on trust.
+          source: resolved.source,
+          ...(key === 'scarlett' ? { mode: resolved.values.mode ?? env.SCARLETT_MODE } : {}),
+        };
+      }),
+    );
+
     res.json({
       ok: true,
       database: db,
-      integrations: describeIntegrations(),
+      integrations: integrationStatus,
       jobs: {
         ...jobsByState,
         // The number that matters: work that gave up. Everything else recovers.
