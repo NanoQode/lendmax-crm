@@ -25,6 +25,8 @@ import type pg from 'pg';
 import { query, queryOne, withTransaction } from '../db/pool.ts';
 import { log } from '../lib/logger.ts';
 import { integrationReady, resolveIntegration } from '../services/integrations.ts';
+import { calendarDateIn } from '../domain/dates.ts';
+import { env } from '../config/env.ts';
 
 export const SCARLETT_HOST = 'https://api.scarlettnetwork.com';
 const TIMEOUT_MS = 30_000;
@@ -322,7 +324,10 @@ export async function buildDeal(
   put(mortgageApplication, 'RequestedAmount', num(app.amount_requested));
   put(mortgageApplication, 'MortgagePosition', num(app.request_position) ?? 1);
   put(mortgageApplication, 'RenewalDate', date(app.maturity_date));
-  put(mortgageApplication, 'ApplicationDate', str(app.created_at).slice(0, 10));
+  // Not str(created_at).slice(0,10): created_at is a TIMESTAMPTZ, so the driver
+  // hands back a Date, String() gives "Sun Sep 13 2026 …", and the first ten
+  // characters of that are "Sun Sep 13". Scarlett was being sent that verbatim.
+  put(mortgageApplication, 'ApplicationDate', calendarDateIn(app.created_at, env.BROKERAGE_TIMEZONE));
   // Our ratios travel as figures, not as a claim Scarlett will agree — they run
   // their own. Sent because a broker opening the deal wants to see what the
   // client was shown.
@@ -477,11 +482,70 @@ export async function buildDeal(
   put(subjectProperty, 'DownPayment', num(app.down_payment));
   put(subjectProperty, 'DownPaymentSource', code('DownPaymentSource', app.down_payment_source));
   put(subjectProperty, 'ClosingDate', date(app.closing_date));
-  const subjectCharges = chargesFor(null);
-  if (subjectCharges.length) subjectProperty.Mortgages = subjectCharges;
+  /**
+   * The subject property belongs to Deal.SubjectProperty and must not also be
+   * listed among the applicant's other properties: Scarlett then has the deal's
+   * own security twice, once as the property being financed and once as an
+   * unrelated holding, and underwrites against both.
+   *
+   * The portal keeps the two apart (`data.property` against
+   * `data.other_properties`), so this normally removes nothing. It exists for
+   * the case the portal cannot prevent — a client listing the property they are
+   * financing again under "do you own other properties", which is a reasonable
+   * reading of the question and produces exactly that duplicate.
+   *
+   * Matched on address rather than on a flag, because a re-entered property has
+   * no flag; it is simply the same address typed twice.
+   */
+  const addressKey = (unit: unknown, number: unknown, street: unknown, city: unknown, postal: unknown) =>
+    [str(unit), str(number), str(street), str(city), str(postal)]
+      .join(' ')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
 
-  if (properties.rows.length) {
-    group.OtherProperties = properties.rows.map((p) => {
+  const subjectKey = addressKey(
+    app.property_unit, app.property_street_number, app.property_street_name,
+    app.property_city, app.property_postal_code,
+  );
+  // A postal code alone is enough to match: two different properties do not
+  // share one, and a street typed slightly differently still should not slip
+  // through as a second property.
+  const subjectPostal = str(app.property_postal_code).toUpperCase().replace(/\s+/g, '');
+
+  const isSubjectDuplicate = (p: Row): boolean => {
+    if (!subjectKey && !subjectPostal) return false;
+    const postal = str(p.postal_code).toUpperCase().replace(/\s+/g, '');
+    if (subjectPostal && postal && postal === subjectPostal) return true;
+    // The portal's other-property rows hold one `street` line rather than a
+    // split number and name, so compare against the subject's joined form.
+    const key = addressKey(null, null, p.street, p.city, p.postal_code);
+    return Boolean(subjectKey && key && (key === subjectKey || subjectKey.endsWith(key)));
+  };
+
+  const duplicates = properties.rows.filter(isSubjectDuplicate);
+  const otherProperties = properties.rows.filter((p) => !isSubjectDuplicate(p));
+
+  // Its charges come with it. A duplicate row is where the client recorded the
+  // mortgage being refinanced, so dropping the row silently would drop the
+  // existing mortgage off the deal entirely.
+  const subjectCharges = [
+    ...chargesFor(null),
+    ...duplicates.flatMap((p) => chargesFor(p.id)),
+  ];
+  if (duplicates.length) {
+    warnings.push(
+      `The subject property was also listed under the applicant's other properties ` +
+      `(${duplicates.length === 1 ? 'once' : `${duplicates.length} times`}). It has been sent once, ` +
+      `as the subject property, with its mortgage(s).`,
+    );
+  }
+  if (subjectCharges.length) {
+    subjectProperty.Mortgages = subjectCharges.map((c, i) => ({ ...c, Position: Number(c.Position) || i + 1 }));
+  }
+
+  if (otherProperties.length) {
+    group.OtherProperties = otherProperties.map((p) => {
       const o: Record<string, unknown> = {};
       const addr: Record<string, unknown> = {};
       put(addr, 'StreetName', str(p.street));
@@ -502,6 +566,40 @@ export async function buildDeal(
       if (charges.length) o.Mortgages = charges;
       return o;
     });
+  }
+
+  /**
+   * What is being asked for, as against the charges already registered.
+   *
+   * Without this the deal carries the existing mortgages and no request, so
+   * Scarlett has nothing to underwrite — the amount travelled only as
+   * MortgageApplication.RequestedAmount, which describes the application
+   * rather than the mortgage wanted on this property.
+   *
+   * The amount goes in TotalLoanAmount. OriginalMortgageAmount is what a
+   * mortgage was advanced at, which a mortgage that does not exist yet does
+   * not have.
+   */
+  const requested: Record<string, unknown> = {};
+  put(requested, 'TotalLoanAmount', num(app.amount_requested));
+
+  // MortgageTypeDD is the rank the new charge will take: 1 first, 2 second,
+  // 3 third. It is the same figure already sent as MortgagePosition, so the two
+  // cannot disagree. Anything outside 1–3 is left out rather than clamped — a
+  // fourth charge is a real thing to be told about, and a confidently wrong
+  // integer is the one mistake their code tables exist to prevent.
+  const requestedRank = num(app.request_position) ?? 1;
+  if (requestedRank >= 1 && requestedRank <= 3 && Number.isInteger(requestedRank)) {
+    put(requested, 'MortgageTypeDD', requestedRank);
+  } else {
+    warnings.push(
+      `The requested mortgage is in position ${requestedRank}, which is outside the 1–3 that ` +
+      'Scarlett accepts for MortgageTypeDD, so the type has been left out of the push.',
+    );
+  }
+
+  if (num(app.amount_requested) !== null) {
+    subjectProperty.PropertyMortgage = { RequestedMortgages: [requested] };
   }
 
   const deal: Record<string, unknown> = {

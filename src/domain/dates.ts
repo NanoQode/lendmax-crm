@@ -43,15 +43,30 @@ export function toIsoDate(d: Date): IsoDate {
   return d.toISOString().slice(0, 10);
 }
 
-/** Today, in a named zone — not in the server's zone, which is UTC. */
-export function todayIn(timezone: string, now: Date = new Date()): IsoDate {
+/**
+ * The calendar date an instant falls on, in a named zone.
+ *
+ * A TIMESTAMPTZ read back from the driver is a Date, and String(date) is
+ * "Sun Sep 13 2026 …" — so slicing the first ten characters off it yields
+ * "Sun Sep 13", which is not a date and which every consumer will reject.
+ * The zone matters as much as the format: a file created at 21:00 in Toronto
+ * is already tomorrow in UTC, and dating it tomorrow is wrong on the paperwork.
+ */
+export function calendarDateIn(at: Date | string | number, timezone: string): IsoDate {
+  const d = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(d.getTime())) return '';
   // en-CA formats as YYYY-MM-DD, which is exactly the shape we store.
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(now);
+  }).format(d);
+}
+
+/** Today, in a named zone — not in the server's zone, which is UTC. */
+export function todayIn(timezone: string, now: Date = new Date()): IsoDate {
+  return calendarDateIn(now, timezone);
 }
 
 export function addDays(date: IsoDate, days: number): IsoDate {
