@@ -375,6 +375,55 @@ async function ensureOrganization(): Promise<string> {
   return rows[0]!.id;
 }
 
+/**
+ * The two people every arriving file is routed to, per answer 8: Michael Squeo
+ * as the manager and Joe Marker on underwriting. They are created without a
+ * password — they sign in by having one set, rather than by a default that
+ * somebody forgets to change.
+ *
+ * `underwriting@lendmax.ca` is deliberately Joe's address: answer 26 says the
+ * "Underwriting Team" is a persona on that mailbox, not a separate human, and
+ * the tone-rotation templates sign as the team rather than inventing a person.
+ */
+async function seedStaff(orgId: string): Promise<Record<string, string>> {
+  const staff = [
+    { email: 'michael@lendmax.ca', name: 'Michael Squeo', role: 'manager' },
+    { email: 'underwriting@lendmax.ca', name: 'Joe Marker', role: 'underwriter' },
+  ];
+  const ids: Record<string, string> = {};
+  for (const person of staff) {
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO users (organization_id, email, name, role, active, profile_complete)
+       VALUES ($1,$2,$3,$4,true,false)
+       ON CONFLICT (organization_id, lower(email))
+       DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role, active = true
+       RETURNING id`,
+      [orgId, person.email, person.name, person.role],
+    );
+    ids[person.role] = rows[0]!.id;
+  }
+
+  // Every arriving file gets an owner rather than sitting unclaimed (answer 8).
+  // Fixed rather than round robin, because Ali named two specific people.
+  for (const [role, userId] of Object.entries(ids)) {
+    // No unique key on (organization_id, role) — the table allows several
+    // ordered rules per role on purpose — so this checks rather than upserts,
+    // and leaves a rule somebody has since edited alone.
+    const existing = await pool.query(
+      'SELECT id FROM assignment_rules WHERE organization_id = $1 AND role = $2',
+      [orgId, role],
+    );
+    if (existing.rows.length) continue;
+    await pool.query(
+      `INSERT INTO assignment_rules (organization_id, role, mode, fixed_user_id, position, active)
+       VALUES ($1,$2,'fixed',$3,1,true)`,
+      [orgId, role, userId],
+    );
+  }
+  console.log('Staff seeded: Michael Squeo (manager), Joe Marker (underwriter).');
+  return ids;
+}
+
 async function seedDemo(orgId: string, brokerId: string): Promise<void> {
   const today = todayIn(TZ);
   const people = [
@@ -550,6 +599,7 @@ async function main(): Promise<void> {
   await seedVocabularies(orgId);
   console.log('Vocabularies seeded.');
   await seedAutomations(orgId);
+  await seedStaff(orgId);
 
   let password: string | undefined;
   if (adminEmail) {
