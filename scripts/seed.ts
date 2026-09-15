@@ -131,7 +131,13 @@ const DOCUMENT_CATEGORIES: Array<[string, string, string, boolean, boolean]> = [
 const COMPLIANCE_CHECKLIST = {
   key: 'standard_on',
   name: 'Standard file (Ontario)',
-  version: 1,
+  // v2 adds the funded package Ali listed in answer 18. Bumped rather than
+  // edited in place: the seeder writes ON CONFLICT DO NOTHING per (key,
+  // version), so editing v1 silently changed nothing on any database that
+  // already had it — and a case records the version it was completed against,
+  // so files already in flight keep the checklist they started with instead of
+  // retroactively growing three outstanding items.
+  version: 2,
   province: 'ON',
   items: [
     { key: 'application_complete', group: 'application', label: 'Application complete and signed', required: true, evidence: 'field' },
