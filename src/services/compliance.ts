@@ -493,3 +493,34 @@ export function approvalBlockers(
   if (!fintracComplete) blockers.push('The FINTRAC assessment has not been completed');
   return blockers;
 }
+
+/**
+ * What is stopping commission being paid on this file.
+ *
+ * Answer 19: the checks confirm every requirement is complete before
+ * commission is paid. That is a different question from "can this file be
+ * approved" — approval is about the compliance case, this is about money
+ * leaving the brokerage — so it is asked separately and answered by naming
+ * every outstanding item rather than a yes/no.
+ *
+ * Returns an empty array when nothing is outstanding. Items marked
+ * `not_applicable` are not blockers: a file with no appraisal requirement
+ * should not be held for one.
+ */
+export async function commissionPayoutBlockers(
+  applicationId: string,
+): Promise<Array<{ item_key: string; label: string; group_key: string | null; status: string }>> {
+  const { rows } = await query<{
+    item_key: string; label: string; group_key: string | null; status: string;
+  }>(
+    `SELECT i.item_key, i.label, i.group_key, i.status
+       FROM compliance_checklist_items i
+       JOIN compliance_cases c ON c.id = i.compliance_case_id
+      WHERE c.application_id = $1
+        AND i.required
+        AND i.status IN ('outstanding', 'rejected')
+      ORDER BY i.position, i.label`,
+    [applicationId],
+  );
+  return rows;
+}

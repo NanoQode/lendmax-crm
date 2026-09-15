@@ -24,6 +24,7 @@ import {
 } from '../../domain/money.ts';
 import { todayIn } from '../../domain/dates.ts';
 import { env } from '../../config/env.ts';
+import { commissionPayoutBlockers } from '../../services/compliance.ts';
 
 export const fundingRoutes: Router = Router();
 fundingRoutes.use(requireAuth);
@@ -507,6 +508,27 @@ fundingRoutes.put(
     }
     if (difference !== null && difference !== 0 && status === 'received') {
       status = 'variance';
+    }
+
+    // Answer 19: the compliance package has to be complete before commission
+    // is paid. Checked on the way IN to a paid state rather than continuously,
+    // so a file that was legitimately paid does not become retroactively
+    // invalid when somebody later adds a requirement to the template.
+    //
+    // It names every outstanding item rather than refusing flatly: "compliance
+    // incomplete" sends somebody hunting, a list is a thing they can finish.
+    const PAID_STATES = new Set(['received', 'reconciled', 'closed']);
+    if (PAID_STATES.has(status) && !PAID_STATES.has(record.status)) {
+      const blockers = await commissionPayoutBlockers(record.application_id);
+      if (blockers.length) {
+        throw new AppError(
+          `Commission cannot be paid while ${blockers.length} required compliance item`
+          + `${blockers.length === 1 ? ' is' : 's are'} outstanding: `
+          + blockers.map((b) => b.label).join(', ') + '.',
+          400, 'compliance_incomplete',
+          blockers.map((b) => b.label),
+        );
+      }
     }
 
     if (body.splits) {

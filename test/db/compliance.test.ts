@@ -21,6 +21,7 @@ import { pool, query, queryOne } from '../../src/db/pool.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import {
   approvalBlockers, deriveItem, gatherEvidence, openCase, reassess, syncDerivedItems,
+  commissionPayoutBlockers,
 } from '../../src/services/compliance.ts';
 
 let orgId: string;
@@ -294,4 +295,63 @@ test('a person’s override satisfies the rating blocker; the model’s review_r
     approvalBlockers(items, { rating: 'low', override_rating: null }, true), []);
   assert.equal(
     approvalBlockers(items, null, true).length, 1);
+});
+
+test('commission payout is blocked while required items are outstanding, and names them', async () => {
+  // Answer 19: the checks confirm every requirement is complete before
+  // commission is paid.
+  const complianceCase = await openIt();
+
+  const outstanding = await commissionPayoutBlockers(applicationId);
+  assert.ok(outstanding.length > 0, 'a fresh case has required items outstanding');
+  assert.ok(
+    outstanding.every((b) => typeof b.label === 'string' && b.label.length > 0),
+    'every blocker carries a label a person can act on, not just a key',
+  );
+
+  // Complete every required item and the gate opens.
+  await query(
+    `UPDATE compliance_checklist_items SET status = 'complete', completed_at = now()
+      WHERE compliance_case_id = $1 AND required`,
+    [complianceCase.id],
+  );
+  assert.deepEqual(await commissionPayoutBlockers(applicationId), []);
+});
+
+test('an item marked not applicable does not hold up commission', async () => {
+  // A file with no appraisal requirement must not be held for one.
+  const complianceCase = await openIt();
+  await query(
+    `UPDATE compliance_checklist_items SET status = 'complete' WHERE compliance_case_id = $1 AND required`,
+    [complianceCase.id],
+  );
+  await query(
+    `UPDATE compliance_checklist_items SET status = 'not_applicable'
+      WHERE compliance_case_id = $1 AND required
+        AND item_key = (SELECT item_key FROM compliance_checklist_items
+                         WHERE compliance_case_id = $1 AND required LIMIT 1)`,
+    [complianceCase.id],
+  );
+  assert.deepEqual(await commissionPayoutBlockers(applicationId), []);
+});
+
+test('a rejected item blocks commission just as an outstanding one does', async () => {
+  // Rejected means somebody looked at it and said no. That is not a reason to
+  // let the money go.
+  const complianceCase = await openIt();
+  await query(
+    `UPDATE compliance_checklist_items SET status = 'complete' WHERE compliance_case_id = $1 AND required`,
+    [complianceCase.id],
+  );
+  const { rows } = await query<{ item_key: string }>(
+    `UPDATE compliance_checklist_items SET status = 'rejected'
+      WHERE compliance_case_id = $1 AND required
+        AND ctid = (SELECT ctid FROM compliance_checklist_items
+                     WHERE compliance_case_id = $1 AND required LIMIT 1)
+      RETURNING item_key`,
+    [complianceCase.id],
+  );
+  const blockers = await commissionPayoutBlockers(applicationId);
+  assert.equal(blockers.length, 1);
+  assert.equal(blockers[0]!.item_key, rows[0]!.item_key);
 });

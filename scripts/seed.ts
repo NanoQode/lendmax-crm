@@ -148,6 +148,13 @@ const COMPLIANCE_CHECKLIST = {
     { key: 'commitment_signed',    group: 'lender',      label: 'Signed commitment on file', required: true, evidence: 'document' },
     { key: 'conditions_satisfied', group: 'lender',      label: 'Lender conditions satisfied', required: true, evidence: 'field' },
     { key: 'appraisal',            group: 'property',    label: 'Appraisal on file where required', required: false, evidence: 'document' },
+    // The funded package Ali listed (answer 18). These come back from Scarlett,
+    // are signed, and are uploaded as a merge — so they are document evidence,
+    // not an attestation somebody ticks. Nothing here is a judgement call:
+    // either the signed document is on the file or it is not.
+    { key: 'amortization_schedule', group: 'funded_package', label: 'Amortization schedule (signed)', required: true, evidence: 'document' },
+    { key: 'fee_direction',         group: 'funded_package', label: 'Fee direction (signed)', required: true, evidence: 'document' },
+    { key: 'cost_of_borrowing',     group: 'funded_package', label: 'Cost of borrowing disclosure (signed)', required: true, evidence: 'document' },
     { key: 'funding_confirmed',    group: 'funding',     label: 'Funding confirmed with final figures', required: true, evidence: 'field' },
     { key: 'correspondence',       group: 'file',        label: 'Client correspondence retained', required: false, evidence: 'attestation' },
   ],
