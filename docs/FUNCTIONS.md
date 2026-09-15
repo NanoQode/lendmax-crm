@@ -11,7 +11,7 @@ Last updated: 2026-09-15.
 
 | Module | What it decides |
 |---|---|
-| `domain/permissions.ts` | 5 roles, ~50 permissions, per-user overrides. Broker sees only assigned files; Underwriter sees all; archive/delete is Underwriter, Admin, Compliance only |
+| `domain/permissions.ts` | 5 roles, 61 permissions, per-user overrides. Broker sees only assigned files; Underwriter sees all; archive/delete is Underwriter, Admin, Compliance only |
 | `domain/pipeline.ts` | Stage entry rules, blockers named individually, one-way past Scarlett, forced moves recorded not silent |
 | `domain/automation.ts` | Definition schema, cycle and unreachable-node detection, condition evaluation |
 | `domain/merge-fields.ts` | Closed registry. An unresolved field drops its whole line rather than sending a blank |

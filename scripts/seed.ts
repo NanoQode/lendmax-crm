@@ -12,6 +12,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { pool, withTransaction } from '../src/db/pool.ts';
+import type pg from 'pg';
 import { hashPassword } from '../src/services/auth.ts';
 import { addDays, addMonths, todayIn } from '../src/domain/dates.ts';
 import { toE164 } from '../src/lib/phone.ts';
@@ -450,6 +451,50 @@ async function seedStaff(orgId: string): Promise<Record<string, string>> {
   return ids;
 }
 
+/**
+ * A few documents on the demo files.
+ *
+ * Without these the Documents module renders an empty state and cannot be
+ * demonstrated or tested — which is how a module with no data looks exactly
+ * like a module that does not work. Deliberately spread across review states:
+ * one accepted, one still pending, one rejected with a reason, so the review
+ * flow and the "collect the rejections into one request" behaviour both have
+ * something real to act on.
+ *
+ * `scan_status` is 'skipped', which is the honest value for a deployment with
+ * no virus scanner — never 'clean', which would claim something untrue.
+ */
+async function seedDemoDocuments(
+  c: pg.PoolClient, orgId: string, applicationId: string, customerId: string,
+  reference: string, index: number,
+): Promise<void> {
+  if (index > 3) return; // only the first few files carry documents
+  // Idempotent: re-running the seeder must not pile up duplicate documents,
+  // and it must still fill in files that were seeded before this existed.
+  const already = await c.query(
+    'SELECT 1 FROM documents WHERE application_id = $1 LIMIT 1', [applicationId]);
+  if (already.rows.length) return;
+  const docs: Array<[string, string, string, string | null]> = [
+    ['identification', "Driver's licence.pdf", 'accepted', null],
+    ['income',         'Pay stub - September.pdf', 'pending', null],
+    ['income',         'Notice of assessment.pdf', 'rejected',
+     'This is the 2024 assessment. We need the most recent one.'],
+  ];
+  for (const [i, [category, filename, review, note]] of docs.entries()) {
+    await c.query(
+      `INSERT INTO documents (organization_id, application_id, customer_id, category_key,
+                              filename, display_label, mime_type, byte_size,
+                              storage_driver, storage_key, source,
+                              review_status, review_note, scan_status, scan_at, scan_detail)
+       VALUES ($1,$2,$3,$4,$5,$5,'application/pdf',184320,'local',$6,'client_upload',
+               $7,$8,'skipped', now(), 'No scanner configured on this deployment.')`,
+      [orgId, applicationId, customerId, category, filename,
+       `demo/${reference}/${i + 1}-${filename.replace(/[^a-zA-Z0-9.]+/g, '-')}`,
+       review, note],
+    );
+  }
+}
+
 async function seedDemo(orgId: string, brokerId: string): Promise<void> {
   const today = todayIn(TZ);
   const people = [
@@ -490,9 +535,21 @@ async function seedDemo(orgId: string, brokerId: string): Promise<void> {
 
   for (const p of people) {
     await withTransaction(async (c) => {
-      const existing = await c.query('SELECT id FROM customers WHERE organization_id = $1 AND email = $2',
-        [orgId, p.email]);
-      if (existing.rows[0]) return;
+      const existing = await c.query<{ id: string }>(
+        'SELECT id FROM customers WHERE organization_id = $1 AND email = $2', [orgId, p.email]);
+      if (existing.rows[0]) {
+        // The file is already here, but it may predate the demo documents.
+        // Fill those in rather than returning and leaving the Documents module
+        // with nothing to render on a database seeded earlier.
+        const app = await c.query<{ id: string }>(
+          'SELECT id FROM applications WHERE customer_id = $1 ORDER BY created_at LIMIT 1',
+          [existing.rows[0].id]);
+        if (app.rows[0]) {
+          await seedDemoDocuments(c, orgId, app.rows[0].id, existing.rows[0].id,
+                                  `LMX-A-202609-${1000 + people.indexOf(p)}`, people.indexOf(p));
+        }
+        return;
+      }
 
       const { rows: cust } = await c.query<{ id: string }>(
         `INSERT INTO customers (organization_id, first_name, last_name, email, phone_e164, phone_raw,
@@ -531,6 +588,9 @@ async function seedDemo(orgId: string, brokerId: string): Promise<void> {
          VALUES ($1,$2,0,'applicant',$3,$4,$5,$6,$7,'ON')`,
         [applicationId, customerId, p.first, p.last, p.email, toE164(p.phone), p.city],
       );
+
+      await seedDemoDocuments(c, orgId, applicationId, customerId,
+                              `LMX-A-202609-${1000 + people.indexOf(p)}`, people.indexOf(p));
       await c.query(
         `INSERT INTO assignments (application_id, user_id, role, is_primary, assigned_by)
          VALUES ($1,$2,'broker',true,$2)`,
