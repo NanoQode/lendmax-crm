@@ -259,7 +259,15 @@ documentRoutes.get(
     res.setHeader('x-content-type-options', 'nosniff');
     getObjectStream(doc.storage_key).on('error', (err) => {
       log.error('could not read a stored document', { id, error: err });
-      if (!res.headersSent) res.status(500).json({ ok: false, error: 'That file could not be read.' });
+      if (res.headersSent) return;
+      // The document's own headers went on before the stream opened, so the
+      // error would otherwise be sent as a JSON body labelled application/pdf
+      // — express keeps a Content-Type that is already set. A browser then
+      // shows a broken-file dialog instead of the sentence explaining what
+      // happened.
+      res.removeHeader('content-type');
+      res.removeHeader('content-disposition');
+      res.status(500).json({ ok: false, error: 'That file could not be read.' });
     }).pipe(res);
   }),
 );

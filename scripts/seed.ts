@@ -13,6 +13,8 @@
 import { randomUUID } from 'node:crypto';
 import { pool, withTransaction } from '../src/db/pool.ts';
 import type pg from 'pg';
+import { Readable } from 'node:stream';
+import { putObject } from '../src/services/storage.ts';
 import { hashPassword } from '../src/services/auth.ts';
 import { addDays, addMonths, todayIn } from '../src/domain/dates.ts';
 import { toE164 } from '../src/lib/phone.ts';
@@ -481,16 +483,30 @@ async function seedDemoDocuments(
      'This is the 2024 assessment. We need the most recent one.'],
   ];
   for (const [i, [category, filename, review, note]] of docs.entries()) {
+    // Write real bytes, not just a row. A document the list shows and the
+    // download cannot open is worse than no document: it looks like the
+    // download is broken rather than like the demo has no file.
+    const pdf = Buffer.from(
+      `%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n` +
+      `2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n` +
+      `3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 120]/Contents 4 0 R` +
+      `/Resources<</Font<</F1 5 0 R>>>>>>endobj\n` +
+      `4 0 obj<</Length 90>>stream\nBT /F1 11 Tf 20 70 Td (${filename.replace(/[()\\]/g, '')}) Tj ` +
+      `0 -20 Td (Demo document - ${reference}) Tj ET\nendstream endobj\n` +
+      `5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n` +
+      `trailer<</Root 1 0 R>>\n%%EOF\n`, 'latin1');
+    const stored = await putObject(Readable.from(pdf), {
+      filename, mimeType: 'application/pdf',
+    });
+
     await c.query(
       `INSERT INTO documents (organization_id, application_id, customer_id, category_key,
                               filename, display_label, mime_type, byte_size,
                               storage_driver, storage_key, source,
                               review_status, review_note, scan_status, scan_at, scan_detail)
-       VALUES ($1,$2,$3,$4,$5,$5,'application/pdf',184320,'local',$6,'client_upload',
+       VALUES ($1,$2,$3,$4,$5,$5,'application/pdf',$9,'local',$6,'client_upload',
                $7,$8,'skipped', now(), 'No scanner configured on this deployment.')`,
-      [orgId, applicationId, customerId, category, filename,
-       `demo/${reference}/${i + 1}-${filename.replace(/[^a-zA-Z0-9.]+/g, '-')}`,
-       review, note],
+      [orgId, applicationId, customerId, category, filename, stored.key, review, note, pdf.length],
     );
   }
 }
