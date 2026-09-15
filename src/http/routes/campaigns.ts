@@ -30,6 +30,7 @@ import {
   BlockSchema, renderCampaign, renderSms, sendBlockers, type Block, type Footer,
 } from '../../domain/blocks.ts';
 import { MERGE_FIELDS, renderTemplate, validateTemplate } from '../../domain/merge-fields.ts';
+import { calculatorMergeValues } from '../../services/link-tracking.ts';
 import { enqueue } from '../../jobs/queue.ts';
 import { env } from '../../config/env.ts';
 
@@ -386,6 +387,7 @@ async function mergeValuesFor(
     ...(row ?? {}),
     user_name: user.name,
     user_first_name: user.name.split(' ')[0],
+    ...calculatorMergeValues(organizationId, customerId, row?.transaction_type_key),
   };
 }
 

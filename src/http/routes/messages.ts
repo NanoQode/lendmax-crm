@@ -29,6 +29,7 @@ import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import { can } from '../../domain/permissions.ts';
 import { gateFor, send } from '../../services/messaging.ts';
 import { renderTemplate, validateTemplate } from '../../domain/merge-fields.ts';
+import { calculatorMergeValues } from '../../services/link-tracking.ts';
 import { measureSegments } from '../../integrations/voipms.ts';
 
 export const messageRoutes: Router = Router();
@@ -334,5 +335,6 @@ async function mergeValues(
   return {
     ...(row ?? {}),
     user_first_name: String(row?.user_name ?? user.name).split(' ')[0],
+    ...calculatorMergeValues(organizationId, customerId, row?.transaction_type_key),
   };
 }

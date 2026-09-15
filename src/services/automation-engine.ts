@@ -26,8 +26,7 @@ import {
   waitMs, type AutomationDefinition, type AutomationNode, type Facts,
 } from '../domain/automation.ts';
 import { renderTemplate, type MergeContext } from '../domain/merge-fields.ts';
-import { calculatorFor } from '../domain/calculators.ts';
-import { trackedCalculatorUrl } from './link-tracking.ts';
+import { calculatorMergeValues } from './link-tracking.ts';
 import { send } from './messaging.ts';
 import { enqueue } from '../jobs/queue.ts';
 import { nextSendableTime, type QuietHours, DEFAULT_QUIET_HOURS } from '../domain/dates.ts';
@@ -718,11 +717,6 @@ async function mergeContextFor(ctx: ExecuteContext): Promise<MergeContext> {
       LIMIT 1`,
     [ctx.applicationId],
   );
-  // The calculator that answers this client's question, as a tracked link so
-  // the click lands in their file's log rather than vanishing into rateshop.ca.
-  const calculator = calculatorFor(ctx.facts.transaction_type_key as string | null);
-  const customerId = ctx.customerId;
-
   return {
     values: {
       ...ctx.facts,
@@ -730,10 +724,9 @@ async function mergeContextFor(ctx: ExecuteContext): Promise<MergeContext> {
       user_first_name: user?.name?.split(' ')[0] ?? null,
       user_cell: user?.mobile_phone ?? null,
       schedule_link: user?.booking_url ?? null,
-      calculator_name: calculator.name,
-      calculator_link: customerId
-        ? trackedCalculatorUrl(ctx.organizationId, customerId, calculator.slug)
-        : null,
+      // Same helper the manual composer and campaigns use, so a calculator
+      // link means the same thing however the message was written.
+      ...calculatorMergeValues(ctx.organizationId, ctx.customerId, ctx.facts.transaction_type_key),
     },
   };
 }
