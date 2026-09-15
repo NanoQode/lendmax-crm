@@ -193,3 +193,23 @@ test('addDays crosses month and year boundaries', () => {
   assert.equal(addDays('2027-01-01', -1), '2026-12-31');
   assert.equal(addDays('2024-02-28', 1), '2024-02-29');
 });
+
+test('quiet hours end at 08:30, not 08:00', () => {
+  const tz = 'America/Toronto';
+  // 08:15 local is still quiet; the window runs to 08:30 (answer 27).
+  const quarterPast = new Date('2026-09-15T12:15:00Z'); // 08:15 EDT
+  assert.equal(isWithinQuietHours(quarterPast, tz, DEFAULT_QUIET_HOURS), true);
+
+  const halfPast = new Date('2026-09-15T12:30:00Z'); // 08:30 EDT
+  assert.equal(isWithinQuietHours(halfPast, tz, DEFAULT_QUIET_HOURS), false);
+
+  // Something queued at 08:15 waits the fifteen minutes, not the full hour.
+  const sendable = nextSendableTime(quarterPast, tz, DEFAULT_QUIET_HOURS);
+  assert.equal(sendable.toISOString(), '2026-09-15T12:30:00.000Z');
+});
+
+test('quiet hours still cover the evening side of the window', () => {
+  const tz = 'America/Toronto';
+  assert.equal(isWithinQuietHours(new Date('2026-09-16T00:59:00Z'), tz, DEFAULT_QUIET_HOURS), false); // 20:59
+  assert.equal(isWithinQuietHours(new Date('2026-09-16T01:00:00Z'), tz, DEFAULT_QUIET_HOURS), true);  // 21:00
+});

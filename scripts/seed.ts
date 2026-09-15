@@ -23,12 +23,14 @@ const TZ = 'America/Toronto';
  * are a starting point, not a constant, which is why they live in a table.
  */
 const STAGES = [
-  { key: 'lead',              label: 'Lead',              position: 1, category: 'open',  probability: 5,   colour: '#6366f1', rules: {} },
+  { key: 'lead',              label: 'Lead',              position: 1, category: 'open',  probability: 5,   colour: '#6366f1',
+    rules: { blockedOnceScarlettPushed: true } },
   { key: 'application',       label: 'Application',       position: 2, category: 'open',  probability: 20,  colour: '#0ea5e9',
-    rules: { minPercentComplete: 60 } },
+    rules: { minPercentComplete: 50, blockedOnceScarlettPushed: true } },
   { key: 'appointment_booked', label: 'Appointment Booked', position: 3, category: 'open', probability: 35, colour: '#14b8a6',
-    rules: { requireAppointment: true } },
-  { key: 'no_show',           label: 'No Show',           position: 4, category: 'open',  probability: 10,  colour: '#f59e0b', rules: {} },
+    rules: { requireAppointment: true, blockedOnceScarlettPushed: true } },
+  { key: 'no_show',           label: 'No Show',           position: 4, category: 'open',  probability: 10,  colour: '#f59e0b',
+    rules: { blockedOnceScarlettPushed: true } },
   { key: 'scarlett',          label: 'Scarlett',          position: 5, category: 'open',  probability: 65,  colour: '#8b5cf6',
     rules: { requireScarlettDeal: true } },
   { key: 'funded',            label: 'Funded',            position: 6, category: 'won',   probability: 100, colour: '#10b981',

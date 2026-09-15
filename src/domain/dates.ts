@@ -271,18 +271,39 @@ export type QuietHours = {
   enabled: boolean;
   /** Local hour at which sending stops, e.g. 21 for 9pm. */
   startHour: number;
+  /** Minutes past startHour, e.g. 30 for 9:30pm. Absent means on the hour. */
+  startMinute?: number;
   /** Local hour at which it may resume, e.g. 8 for 8am. */
   endHour: number;
+  /** Minutes past endHour, e.g. 30 for 8:30am. Absent means on the hour. */
+  endMinute?: number;
   /** When false, weekends are treated as sendable. */
   respectWeekends: boolean;
 };
 
+/**
+ * 9pm to 8:30am, on Ali's instruction (answer 27), and it applies to
+ * notifications as well as client messages.
+ *
+ * The half hour is why this carries minutes at all. The window used to be
+ * expressed in whole hours, which silently rounded 08:30 to 08:00 and would
+ * have let half an hour of sends out before anybody was meant to be woken.
+ * The minute fields are optional so a settings row written before they
+ * existed still reads correctly as being on the hour.
+ */
 export const DEFAULT_QUIET_HOURS: QuietHours = {
   enabled: true,
   startHour: 21,
+  startMinute: 0,
   endHour: 8,
+  endMinute: 30,
   respectWeekends: false,
 };
+
+/** Minutes since local midnight, so a window can be compared as one number. */
+function minutesOfDay(hour: number, minute: number | undefined): number {
+  return hour * 60 + (minute ?? 0);
+}
 
 /** The local wall-clock hour and weekday of an instant, in a named zone. */
 export function localParts(at: Date, timezone: string): { hour: number; minute: number; weekday: number } {
@@ -305,13 +326,14 @@ export function localParts(at: Date, timezone: string): { hour: number; minute: 
 
 export function isWithinQuietHours(at: Date, timezone: string, quiet: QuietHours): boolean {
   if (!quiet.enabled) return false;
-  const { hour, weekday } = localParts(at, timezone);
+  const { hour, minute, weekday } = localParts(at, timezone);
   if (quiet.respectWeekends && (weekday === 0 || weekday === 6)) return true;
-  // A window that wraps midnight (21:00 → 08:00) is the normal case, so it is
+  const now = minutesOfDay(hour, minute);
+  const start = minutesOfDay(quiet.startHour, quiet.startMinute);
+  const end = minutesOfDay(quiet.endHour, quiet.endMinute);
+  // A window that wraps midnight (21:00 → 08:30) is the normal case, so it is
   // the case handled first rather than the special one bolted on.
-  return quiet.startHour > quiet.endHour
-    ? hour >= quiet.startHour || hour < quiet.endHour
-    : hour >= quiet.startHour && hour < quiet.endHour;
+  return start > end ? now >= start || now < end : now >= start && now < end;
 }
 
 /**
@@ -324,8 +346,10 @@ export function nextSendableTime(at: Date, timezone: string, quiet: QuietHours):
   // offset by hand: this stays correct across a daylight-saving boundary,
   // which arithmetic on a fixed offset does not.
   const cursor = new Date(at.getTime());
-  for (let i = 0; i < 4 * 24 * 3; i++) {
-    cursor.setTime(cursor.getTime() + 15 * 60_000);
+  // A minute at a time, not fifteen: the window can now end on a half hour,
+  // and a coarser step would overshoot 08:30 and send late for no reason.
+  for (let i = 0; i < 60 * 24 * 3; i++) {
+    cursor.setTime(cursor.getTime() + 60_000);
     if (!isWithinQuietHours(cursor, timezone, quiet)) {
       // Land on the minute, not on whatever fifteen-minute offset we stopped at.
       cursor.setSeconds(0, 0);

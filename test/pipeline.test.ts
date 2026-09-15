@@ -196,3 +196,24 @@ test('stalledFiles reports only stages with a configured threshold, worst first'
   assert.equal(stalled[0]!.days, 41);
   assert.equal(stalled[0]!.threshold, 14);
 });
+
+test('a file submitted to Scarlett cannot be moved back before it', () => {
+  // Answer 12: "Cant move back after Scarlett."
+  const pushed = file({ stage_key: 'scarlett', scarlett_deal_id: 'SC-88213' });
+  const application = stage({
+    key: 'application', label: 'Application', position: 2,
+    entry_rules: { blockedOnceScarlettPushed: true },
+  });
+
+  const decision = evaluateTransition(pushed, application, { now: NOW });
+  assert.equal(decision.allowed, false);
+  assert.match(
+    decision.allowed === false ? decision.message : '',
+    /submitted to Scarlett/,
+    'says why, and points at marking it Lost instead',
+  );
+
+  // The same move is fine on a file that was never pushed.
+  const notPushed = file({ stage_key: 'appointment_booked', scarlett_deal_id: null });
+  assert.equal(evaluateTransition(notPushed, application, { now: NOW }).allowed, true);
+});

@@ -52,6 +52,16 @@ export type EntryRules = {
   requireComplianceComplete?: boolean;
   /** Require at least one future or completed appointment. */
   requireAppointment?: boolean;
+  /**
+   * Refuse this stage once the file has been pushed to Scarlett.
+   *
+   * Ali's instruction (answer 12): a file cannot move back after Scarlett.
+   * Set on the stages that come before it rather than inferred from position,
+   * because the pipeline is configurable — a brokerage that inserts a stage
+   * decides for itself which side of the line it falls on, and nothing here
+   * silently changes meaning when somebody reorders the board.
+   */
+  blockedOnceScarlettPushed?: boolean;
 };
 
 /** The shape the state machine needs to decide. Not the whole application row. */
@@ -154,6 +164,16 @@ export function evaluateTransition(
       field: 'scarlett_deal_id',
       label: 'Scarlett',
       message: 'This file has not been pushed to Scarlett.',
+    });
+  }
+
+  if (rules.blockedOnceScarlettPushed && !isBlank(file.scarlett_deal_id)) {
+    blockers.push({
+      field: 'scarlett_deal_id',
+      label: 'Scarlett',
+      message:
+        `This file has been submitted to Scarlett, so it cannot move back to ${toStage.label}. ` +
+        'Mark it Lost with a reason if it is not proceeding.',
     });
   }
 

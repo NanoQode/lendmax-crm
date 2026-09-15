@@ -62,6 +62,8 @@ export const MERGE_FIELDS: FieldSpec[] = [
     example: 'https://lendmax.ca/crm/upload/…' },
   { name: 'calculator_link', label: 'Relevant calculator', format: 'url',
     example: 'https://rateshop.ca/…' },
+  { name: 'calculator_name', label: 'Name of that calculator',
+    example: 'Refinance vs Renew Calculator' },
   { name: 'organization_name', label: 'Brokerage name', example: 'Lendmax' },
 ];
 

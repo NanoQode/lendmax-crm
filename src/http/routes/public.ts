@@ -28,6 +28,8 @@ import { env } from '../../config/env.ts';
 import { log } from '../../lib/logger.ts';
 import { checkUpload, putObject, scanObject, MAX_BYTES } from '../../services/storage.ts';
 import { recordAudit, recordAuditSafely } from '../../services/audit.ts';
+import { verifyTrackedLink } from '../../services/link-tracking.ts';
+import { findCalculator } from '../../domain/calculators.ts';
 import { verifyUnsubscribeToken } from '../../services/unsubscribe.ts';
 import { asyncRoute } from '../middleware/errors.ts';
 import { markItemReceived, refreshOutstanding } from './documents.ts';
@@ -529,6 +531,55 @@ const UPLOAD_PAGE = `<!doctype html>
  * has not asked to stop hearing about their closing — and stopping those
  * would be a worse failure than the one being prevented.
  */
+/**
+ * A calculator link a client clicked.
+ *
+ * The click is recorded against their file and then they are redirected. Two
+ * rules make this safe to expose without a session:
+ *
+ * 1. The destination is read from our own calculator list by slug, never from
+ *    the token, so this can never become an open redirect however the token is
+ *    tampered with.
+ * 2. Recording the click is best-effort and never blocks the redirect. A
+ *    client who clicked a link in an email should land on the calculator even
+ *    if our database is having a bad morning.
+ *
+ * A GET here is safe to let a scanner follow: it writes a log line, not a
+ * change to the file. That is why it does not share the unsubscribe page's
+ * "never act on GET" rule — the worst a prefetch can do is record a click
+ * that did not happen, which is a wrong number, not a wrong outcome.
+ */
+publicRoutes.get(
+  '/r/:token',
+  lookupLimiter,
+  asyncRoute(async (req, res) => {
+    const token = z.string().min(20).max(300).parse(req.params.token);
+    const org = await queryOne<{ id: string }>(
+      'SELECT id FROM organizations ORDER BY created_at LIMIT 1',
+    );
+    const link = org ? verifyTrackedLink(token, org.id) : null;
+    if (!org || !link) {
+      res.status(404).type('text/plain').send('That link is not valid.');
+      return;
+    }
+
+    const calculator = findCalculator(link.slug);
+    recordAuditSafely({
+      organizationId: org.id,
+      actor: { kind: 'client', name: 'Client', ip: req.ip },
+      action: 'calculator.opened',
+      entityType: 'customer',
+      entityId: link.customerId,
+      summary: `Opened the ${calculator?.name ?? link.slug} on rateshop.ca`,
+      after: { calculator: link.slug, url: link.destination },
+    });
+
+    res.setHeader('cache-control', 'no-store');
+    res.setHeader('x-robots-tag', 'noindex, nofollow');
+    res.redirect(302, link.destination);
+  }),
+);
+
 publicRoutes.get(
   '/u/:token',
   lookupLimiter,
