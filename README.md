@@ -91,16 +91,81 @@ by whoever inherits it without first learning a toolchain.
 
 ## 2. Running it
 
+### Prerequisites
+
+| | |
+|---|---|
+| Node | **22 or newer.** Types are stripped at load (`--experimental-strip-types`), so there is no server build step and no `dist/` to go stale. Node 20 cannot run this. |
+| PostgreSQL | **16 or newer.** Needs `gen_random_uuid()` (pgcrypto, built in from 13) and `jsonb` path operators. |
+| Nothing else | No Redis, no message broker, no container runtime. The job queue is a Postgres table. |
+
+### First run, from a clean checkout
+
 ```bash
-npm install
-cp .env.example .env          # fill in DATABASE_URL and SESSION_SECRET
-npm run migrate
-npm run seed -- --admin you@lendmax.ca   # prints a password once
-npm run build:web
-npm start                     # http://localhost:3400/crm
+npm install                    # full install: esbuild and preact build the client
+cp .env.example .env           # then edit it — see the table below
+npm run migrate                # creates the schema
+npm run seed                   # vocabularies, default automations, staff accounts
+npm run seed -- --admin you@lendmax.ca    # prints a one-time password, once
+npm run build:web              # hashed assets + index.html + csp-hashes.json
+npm start                      # http://localhost:3400/crm
 ```
 
-Add `--demo` to the seed for six realistic files.
+Add `--demo` to the seed for ten realistic files spread across nine
+transaction types, five provinces and seven pipeline stages, each with
+applicants, and the first four with documents you can actually open:
+
+```bash
+npm run seed -- --demo
+```
+
+Seeding is idempotent. Run it as often as you like: it inserts what is
+missing, never overwrites something you have edited, and never duplicates.
+
+### The environment variables that matter
+
+`.env.example` documents all of them. These are the ones without which
+nothing works:
+
+| Variable | Notes |
+|---|---|
+| `DATABASE_URL` | `postgres://user:pass@host:5432/dbname` |
+| `SESSION_SECRET` | `openssl rand -hex 32`. Rotating it signs everybody out. |
+| `CREDENTIALS_KEY` | `openssl rand -base64 32`. Encrypts integration credentials at rest (AES-256-GCM). Rotating it makes every stored credential unreadable, which is *why* it is separate from `SESSION_SECRET`. |
+| `BASE_PATH` | `/crm`. The app serves this prefix only and refuses anything outside it. |
+| `PUBLIC_URL` | `https://lendmax.ca/crm`. Used to build unsubscribe and upload links that must work from a client's inbox. |
+| `STORAGE_LOCAL_DIR` | Where uploaded documents go. Must be writable by the service user. |
+
+Generate the secrets **on the machine that will run it** so they never pass
+through a terminal transcript.
+
+### Quoting in the environment file
+
+Every value should be quoted. systemd is relaxed about this; `bash` is not,
+and the deploy script sources the same file systemd reads. Unquoted, this line
+
+```
+EMAIL_FROM=Lendmax <noreply@lendmax.ca>
+```
+
+is a *redirection* to bash and takes the whole file down with it.
+
+### Integrations are configured in the dashboard, not here
+
+Scarlett, VoIP.ms, email and the application portal are configured under
+**Settings → Integrations**, and those values take precedence over the
+environment. The environment variables exist so a fresh install has somewhere
+to start; the database is where they belong once somebody has entered them.
+
+Two things to know:
+
+- The portal URL must be the **loopback address** (`http://127.0.0.1:3200`),
+  not `https://apply.lendmax.ca`. nginx returns 404 for `/api/internal/` from
+  the internet on both machines, so the public hostname fails every document
+  fetch.
+- Scarlett refuses to push until its code tables have been pulled
+  (**Settings → Integrations → Scarlett → Pull code tables**). An enum that
+  cannot be mapped is left out of the payload rather than guessed.
 
 ```bash
 npm run dev              # server, watching
@@ -336,6 +401,50 @@ A systemd unit with `EnvironmentFile=/etc/lendmax/crm.env`, `Restart=always`,
 drains: the listener closes, in-flight requests finish, then the pool closes —
 a hard exit mid-request leaves a half-written stage change.
 
+### The scripts that do it
+
+`deploy/` holds the three files as deployed, and `deploy/README.md` explains
+each. In short:
+
+```bash
+deploy/lendmax-brokerage-crm.service  →  /etc/systemd/system/
+deploy/deploy-brokerage-crm           →  /usr/local/sbin/   # code, schema, build, restart
+deploy/deploy-brokerage-crm-nginx     →  /usr/local/sbin/   # public routing, LAST
+```
+
+The nginx step is separate on purpose: it edits the config that serves *every*
+site on the machine. It backs up first, runs `nginx -t`, and restores the
+backup rather than reloading a config nginx rejected. Run it only once the app
+answers on its port.
+
+### Four things that cost time — leave them as they are
+
+1. **`systemctl enable --now` does nothing to a running service.** The first
+   deploy works and every one after it reports success while the old code keeps
+   serving. Enable for boot, then `restart` unconditionally.
+2. **`npm ci` installs everything, then prune.** `--omit=dev` up front skips
+   `esbuild` and `preact`, so the client never builds. Skip Playwright's
+   browser download instead (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`).
+3. **`npm` may not be on `PATH`** even where `node` is, if only `node` was
+   symlinked into `/usr/local/bin`. Put the Node install's own `bin` on `PATH`.
+4. **`if nginx -t | tail -2` tests `tail`,** which is always 0 — so the
+   restore-from-backup branch can never run and a rejected config stays on disk
+   to fail at the next restart. Capture the output and test the status.
+
+### Verifying a deploy
+
+```bash
+curl -fsS http://127.0.0.1:3400/crm/api/health            # before nginx
+curl -sL  https://lendmax.ca/crm/ -o /dev/null -w '%{http_code}\n'
+curl -s   https://lendmax.ca/crm/api/customers -o /dev/null -w '%{http_code}\n'    # 401 signed out
+curl -s   https://lendmax.ca/crm/api/internal/x -o /dev/null -w '%{http_code}\n'   # 404, always
+```
+
+`/crm` answers 301 → `/crm/`; a check without `-L` reports the redirect, not a
+failure. The index references hashed asset filenames, so confirm the `app-*.js`
+it names actually returns 200 — that pairing is what a stale committed
+`index.html` used to break.
+
 **Backups:** `pg_dump` nightly plus WAL archiving; object storage versioned.
 Restore has to be *rehearsed*, not documented — an untested restore is a hope.
 
@@ -343,8 +452,9 @@ Restore has to be *rehearsed*, not documented — an untested restore is a hope.
 
 ## 8. What remains
 
-Items 1 to 10 of the original list are built, running and tested. What is
-left is genuinely left — each line is real work, not a stub to fill in.
+`docs/FUNCTIONS.md` is the running inventory and is kept current — read that
+first. This section covers the larger pieces. Each line is real work, not a
+stub to fill in.
 
 1. **Google Calendar** — OAuth, token storage, idempotent event sync. The
    appointment schema carries `google_event_id` and the calendar screen says
@@ -360,9 +470,10 @@ left is genuinely left — each line is real work, not a stub to fill in.
 4. **The retention runner** — the policies are configured, dated and sourced,
    and every one defaults to `review`. The job that walks them and *proposes*
    (never executes) does not exist yet.
-5. **The backfill** — the 17 applications already mirrored into
-   `/var/lib/lendmax/lendmax.db` have not been imported. The importer handles
-   them; nobody has run it against them.
+5. **The backfill** — the portal holds 21 applications. Two have been pulled
+   through the live mirror endpoint to prove the contract end to end; the rest
+   have not been imported. The importer handles them and is idempotent —
+   nobody has run it across the set.
 6. **Campaign attribution** — `campaign_attributions` is written by nothing
    yet. The reporting reads it and correctly shows zero; the job that
    attributes an application or a funding back to a campaign that preceded it
