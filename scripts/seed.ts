@@ -407,18 +407,31 @@ async function seedStaff(orgId: string): Promise<Record<string, string>> {
   // Fixed rather than round robin, because Ali named two specific people.
   for (const [role, userId] of Object.entries(ids)) {
     // No unique key on (organization_id, role) — the table allows several
-    // ordered rules per role on purpose — so this checks rather than upserts,
-    // and leaves a rule somebody has since edited alone.
-    const existing = await pool.query(
-      'SELECT id FROM assignment_rules WHERE organization_id = $1 AND role = $2',
+    // ordered rules per role on purpose — so this checks rather than upserts.
+    //
+    // A rule already pointing at somebody, or rotating, is a decision someone
+    // made and is left alone. A rule still on 'unassigned' is the shipped
+    // default rather than a choice, so it gets filled in: leaving it would
+    // mean files keep arriving with no owner, which is the thing answer 8
+    // asked to stop.
+    const existing = await pool.query<{ id: string; mode: string }>(
+      'SELECT id, mode FROM assignment_rules WHERE organization_id = $1 AND role = $2 ORDER BY position LIMIT 1',
       [orgId, role],
     );
-    if (existing.rows.length) continue;
-    await pool.query(
-      `INSERT INTO assignment_rules (organization_id, role, mode, fixed_user_id, position, active)
-       VALUES ($1,$2,'fixed',$3,1,true)`,
-      [orgId, role, userId],
-    );
+    const current = existing.rows[0];
+    if (current && current.mode !== 'unassigned') continue;
+    if (current) {
+      await pool.query(
+        `UPDATE assignment_rules SET mode = 'fixed', fixed_user_id = $2, active = true WHERE id = $1`,
+        [current.id, userId],
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO assignment_rules (organization_id, role, mode, fixed_user_id, position, active)
+         VALUES ($1,$2,'fixed',$3,1,true)`,
+        [orgId, role, userId],
+      );
+    }
   }
   console.log('Staff seeded: Michael Squeo (manager), Joe Marker (underwriter).');
   return ids;
