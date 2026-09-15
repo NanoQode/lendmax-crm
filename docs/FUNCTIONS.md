@@ -23,6 +23,11 @@ Last updated: 2026-09-15.
 | `domain/calculators.ts` | The 36 RateShop calculators, verified live, mapped to all 13 transaction types |
 | `domain/default-automations.ts` | Six shipped sequences, seeded paused |
 
+Compliance checklist `standard_on` is at **v2**, which adds the funded package
+from answer 18 (amortization schedule, fee direction, cost of borrowing
+disclosure). v1 is kept: a case records the version it was completed against,
+so files in flight do not retroactively grow requirements.
+
 ## Services
 
 `auth` · `audit` (hash-chained, append-only, every break found) · `assignment`
@@ -58,9 +63,11 @@ Calendar · Renewals · Settings · Integrations · Profile.
 - Commission `trailer`, fee direction, disclosure flags and the broker split %
   set at user creation (answer 13) — the schema carries bps, gross, source and
   splits, but not those four.
-- The 13-document funded compliance package as a named checklist gating
-  commission payout, and approve/decline-with-reason notifying the compliance
-  manager (answers 18, 19).
+- Approve/decline-with-reason on the compliance file, notifying the compliance
+  manager, and the commission-payout review that goes with it (answer 19). The
+  payout *gate* is built — commission cannot move to a paid state while a
+  required item is outstanding, and the refusal names every one — but the
+  notification and the adjust-the-payout step are not.
 - No-show popup 10 minutes after an appointment (answer 9).
 - Per-user timezone in the first-login signature flow (answer 35).
 - AI suitability draft.
