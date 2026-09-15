@@ -8,6 +8,16 @@ import assert from 'node:assert/strict';
 import { DEFAULT_AUTOMATIONS } from '../src/domain/default-automations.ts';
 import { DefinitionSchema, validateDefinition } from '../src/domain/automation.ts';
 import { MERGE_FIELD_NAMES } from '../src/domain/merge-fields.ts';
+import {
+  CALCULATORS_BY_TRANSACTION, calculatorFor, findCalculator,
+} from '../src/domain/calculators.ts';
+
+/** Mirrors TRANSACTION_TYPES in scripts/seed.ts. */
+const SEEDED_TRANSACTION_TYPES = new Set([
+  'purchase', 'first_time_buyer', 'renewal', 'refinance', 'switch_transfer',
+  'equity_takeout', 'debt_consolidation', 'heloc', 'second_mortgage',
+  'rental_investment', 'private', 'construction', 'other',
+]);
 
 test('every default automation parses and passes the publish check', () => {
   for (const auto of DEFAULT_AUTOMATIONS) {
@@ -70,4 +80,32 @@ test('the voice rotates — the third and sixth touch are the underwriting desk'
   assert.match(signedBy(5), /The Underwriting Team/, 'sixth touch is the desk');
   assert.match(signedBy(0), /\{user_first_name\}/, 'first touch is the broker');
   assert.doesNotMatch(signedBy(0), /The Underwriting Team/);
+});
+
+test('every seeded transaction type maps to a calculator that exists', () => {
+  // The mapping is keyed on the transaction_type key as seeded. When those two
+  // drift, nothing breaks loudly — every file just quietly falls back to the
+  // generic payment calculator, which is the least useful one on the list.
+  for (const key of Object.keys(CALCULATORS_BY_TRANSACTION)) {
+    assert.ok(
+      SEEDED_TRANSACTION_TYPES.has(key),
+      `${key} is mapped to a calculator but is not a seeded transaction type`,
+    );
+  }
+  for (const key of SEEDED_TRANSACTION_TYPES) {
+    assert.ok(
+      CALCULATORS_BY_TRANSACTION[key]?.length,
+      `transaction type ${key} has no calculator mapping, so it falls back to the generic one`,
+    );
+    for (const slug of CALCULATORS_BY_TRANSACTION[key]!) {
+      assert.ok(findCalculator(slug), `${key} maps to unknown calculator ${slug}`);
+    }
+  }
+});
+
+test('calculatorFor never throws and always returns a real calculator', () => {
+  for (const key of [...SEEDED_TRANSACTION_TYPES, 'nonsense', '', null, undefined]) {
+    const c = calculatorFor(key as string);
+    assert.ok(findCalculator(c.slug), `${key} produced an unknown calculator`);
+  }
 });

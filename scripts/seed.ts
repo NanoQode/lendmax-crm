@@ -380,22 +380,37 @@ async function seedDemo(orgId: string, brokerId: string): Promise<void> {
   const people = [
     { first: 'Sarah', last: 'Johnson', email: 'sarah.johnson@example.com', phone: '(416) 555-0142',
       stage: 'scarlett', type: 'purchase', amount: 785000, city: 'Toronto', street: 'Main Street',
-      number: '123', closing: addDays(today, 34), percent: 100, scarlett: 'SCR-2026-4471' },
+      number: '123', closing: addDays(today, 34), percent: 100, scarlett: 'SCR-2026-4471', province: 'ON' },
     { first: 'Michael', last: 'Chen', email: 'm.chen@example.com', phone: '647-555-0198',
       stage: 'application', type: 'refinance', amount: 420000, city: 'Mississauga', street: 'Lakeshore Road',
-      number: '88', closing: addDays(today, 12), percent: 78, scarlett: null },
+      number: '88', closing: addDays(today, 12), percent: 78, scarlett: null, province: 'ON' },
     { first: 'Priya', last: 'Patel', email: 'priya.patel@example.com', phone: '905 555 0177',
       stage: 'lead', type: 'first_time_buyer', amount: 540000, city: 'Brampton', street: 'Queen Street',
-      number: '4102', closing: null, percent: 35, scarlett: null },
+      number: '4102', closing: null, percent: 35, scarlett: null, province: 'ON' },
     { first: 'David', last: 'Okonkwo', email: 'd.okonkwo@example.com', phone: '(289) 555-0163',
       stage: 'appointment_booked', type: 'renewal', amount: 312000, city: 'Hamilton', street: 'King Street East',
-      number: '760', closing: addDays(today, 61), percent: 92, scarlett: null },
+      number: '760', closing: addDays(today, 61), percent: 92, scarlett: null, province: 'ON' },
     { first: 'Emma', last: 'Tremblay', email: 'emma.t@example.com', phone: '613-555-0110',
       stage: 'funded', type: 'purchase', amount: 615000, city: 'Ottawa', street: 'Bank Street',
-      number: '215', closing: addDays(today, -21), percent: 100, scarlett: 'SCR-2026-4402' },
+      number: '215', closing: addDays(today, -21), percent: 100, scarlett: 'SCR-2026-4402', province: 'ON' },
     { first: 'James', last: 'Whitfield', email: 'jwhitfield@example.com', phone: '416-555-0129',
       stage: 'no_show', type: 'debt_consolidation', amount: 268000, city: 'Etobicoke', street: 'Islington Avenue',
-      number: '1450', closing: null, percent: 64, scarlett: null },
+      number: '1450', closing: null, percent: 64, scarlett: null, province: 'ON' },
+    // Ten files, spread across transaction types and stages, so every screen
+    // has something real to render: a board with one card in one column tells
+    // you nothing about whether the board works.
+    { first: 'Aisha', last: 'Rahman', email: 'aisha.rahman@example.com', phone: '(604) 555-0184',
+      stage: 'application', type: 'rental_investment', amount: 498000, city: 'Burnaby', street: 'Canada Way',
+      number: '3820', closing: addDays(today, 47), percent: 71, scarlett: null, province: 'BC' },
+    { first: 'Grzegorz', last: 'Nowak', email: 'g.nowak@example.com', phone: '780-555-0155',
+      stage: 'scarlett', type: 'private', amount: 185000, city: 'Edmonton', street: 'Jasper Avenue',
+      number: '10230', closing: addDays(today, 19), percent: 100, scarlett: 'SCR-2026-4518', province: 'AB' },
+    { first: 'Marie-Claude', last: 'Gagnon', email: 'mc.gagnon@example.com', phone: '(514) 555-0121',
+      stage: 'lead', type: 'construction', amount: 720000, city: 'Laval', street: 'Boulevard Saint-Martin',
+      number: '1875', closing: null, percent: 22, scarlett: null, province: 'QC' },
+    { first: 'Desmond', last: 'Clarke', email: 'd.clarke@example.com', phone: '902-555-0173',
+      stage: 'lost', type: 'heloc', amount: 150000, city: 'Halifax', street: 'Robie Street',
+      number: '644', closing: null, percent: 88, scarlett: null, province: 'NS', lost: 'found_better_rate' },
   ];
 
   for (const p of people) {
@@ -419,14 +434,19 @@ async function seedDemo(orgId: string, brokerId: string): Promise<void> {
                                    closing_date, percent_complete, applicant_count,
                                    property_street_number, property_street_name, property_city,
                                    property_province, scarlett_deal_id, scarlett_sync_state,
-                                   last_activity_at, documents_outstanding, maturity_date)
+                                   last_activity_at, documents_outstanding, maturity_date,
+                                   lost_disposition_key)
          VALUES ($1,$2,$3,'submitted',$4,$5,$6, now() - interval '6 days', $7,$8,1,
-                 $9,$10,$11,'ON',$12,$13, now() - interval '1 day', $14, $15)
+                 $9,$10,$11,$12,$13,$14, now() - interval '1 day', $15, $16, $17)
          RETURNING id`,
         [orgId, customerId, `LMX-A-202609-${1000 + people.indexOf(p)}`, p.type, p.amount, p.stage,
-         p.closing, p.percent, p.number, p.street, p.city, p.scarlett,
+         p.closing, p.percent, p.number, p.street, p.city,
+         // Province drives land transfer tax and the provincial rules, so a
+         // Halifax file marked Ontario is not a cosmetic error.
+         ('province' in p ? p.province : 'ON'), p.scarlett,
          p.scarlett ? 'ok' : null, p.stage === 'scarlett' ? 2 : 0,
-         p.stage === 'funded' ? addMonths(today, 60) : null],
+         p.stage === 'funded' ? addMonths(today, 60) : null,
+         'lost' in p ? p.lost : null],
       );
       const applicationId = app[0]!.id;
 
