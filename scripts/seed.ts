@@ -15,6 +15,8 @@ import { pool, withTransaction } from '../src/db/pool.ts';
 import { hashPassword } from '../src/services/auth.ts';
 import { addDays, addMonths, todayIn } from '../src/domain/dates.ts';
 import { toE164 } from '../src/lib/phone.ts';
+import { DEFAULT_AUTOMATIONS } from '../src/domain/default-automations.ts';
+import { validateDefinition } from '../src/domain/automation.ts';
 
 const TZ = 'America/Toronto';
 
@@ -193,6 +195,60 @@ const RETENTION: Array<[string, string, string, string, number, string]> = [
   ['lost_files', 'Files that did not proceed', 'application', 'closed_at', 36,
    'PLACEHOLDER — confirm against brokerage policy and privacy obligations before relying on it.'],
 ];
+
+/**
+ * The default follow-up sequences.
+ *
+ * Seeded as `paused`, deliberately. A sequence that starts emailing clients
+ * the moment somebody runs the seeder is not a helpful default — Admin reads
+ * them, edits the wording to sound like the brokerage, and turns them on.
+ * Re-running the seeder never overwrites an edited sequence: it only inserts
+ * what is missing, matched on key.
+ */
+async function seedAutomations(orgId: string): Promise<void> {
+  let added = 0;
+  for (const auto of DEFAULT_AUTOMATIONS) {
+    const issues = validateDefinition(auto.definition).filter((i) => i.level === 'error');
+    if (issues.length) {
+      throw new Error(
+        `Default automation "${auto.key}" would not publish: ${issues.map((i) => i.message).join('; ')}`,
+      );
+    }
+
+    const existing = await pool.query<{ id: string }>(
+      'SELECT id FROM automations WHERE organization_id = $1 AND key = $2',
+      [orgId, auto.key],
+    );
+    if (existing.rows.length) continue;
+
+    // The purpose on the automation is the strongest purpose any step uses:
+    // one marketing step makes the whole sequence marketing as far as the
+    // consent gate is concerned, which is the safe direction to round.
+    const purposes = auto.definition.nodes
+      .map((n) => ('purpose' in n ? n.purpose : undefined))
+      .filter(Boolean) as string[];
+    const purpose = purposes.includes('marketing')
+      ? 'marketing' : purposes.includes('service') ? 'service' : 'transactional';
+
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO automations (organization_id, key, name, description, status, purpose,
+                                allow_reenrollment, reenrollment_cooldown_days)
+       VALUES ($1,$2,$3,$4,'paused',$5,$6,$7) RETURNING id`,
+      [orgId, auto.key, auto.name, auto.description, purpose,
+       auto.key === 'renewal_runway', auto.key === 'renewal_runway' ? 300 : null],
+    );
+    const automationId = rows[0]!.id;
+
+    await pool.query(
+      `INSERT INTO automation_versions (automation_id, version, definition, notes)
+       VALUES ($1, 1, $2, $3)`,
+      [automationId, JSON.stringify(auto.definition),
+       'Shipped default. Timings from docs/research/follow-up-and-content.md.'],
+    );
+    added++;
+  }
+  if (added) console.log(`Automations seeded (${added} added, paused for review).`);
+}
 
 async function seedVocabularies(orgId: string): Promise<void> {
   await withTransaction(async (c) => {
@@ -473,6 +529,7 @@ async function main(): Promise<void> {
   const orgId = await ensureOrganization();
   await seedVocabularies(orgId);
   console.log('Vocabularies seeded.');
+  await seedAutomations(orgId);
 
   let password: string | undefined;
   if (adminEmail) {
