@@ -16,6 +16,7 @@ import { closePool, healthcheck, query } from './db/pool.ts';
 import { loadMigrations } from './db/migrate.ts';
 import { primeRecurringJobs, registerHandlers } from './jobs/handlers/index.ts';
 import { startWorker, stopWorker } from './jobs/worker.ts';
+import { closeAll as closeEventStreams } from './services/realtime.ts';
 
 async function assertSchemaIsCurrent(): Promise<void> {
   const files = await loadMigrations();
@@ -85,6 +86,11 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info('shutting down', { signal });
+
+    // Chat event streams are held open on purpose, so `server.close()` would
+    // wait for every one of them and then be killed by the timer below. They
+    // are ended first; the browser reconnects to the new process on its own.
+    closeEventStreams();
 
     const forced = setTimeout(() => {
       log.error('shutdown timed out; exiting anyway');

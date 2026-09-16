@@ -90,7 +90,10 @@ export type Session = {
 
 export type Config = {
   stages: Array<{ key: string; label: string; position: number; category: string;
-                  probability: number | null; colour: string | null; active: boolean }>;
+                  probability: number | null; colour: string | null; active: boolean;
+                  pipeline_id: string; pipeline_name: string; pipeline_active: boolean }>;
+  pipelines: Array<{ id: string; key: string; name: string; active: boolean; is_default: boolean;
+                     purposes: string[] }>;
   transaction_types: Array<{ key: string; label: string }>;
   lost_dispositions: Array<{ key: string; label: string; requires_note: boolean }>;
   document_categories: Array<{ key: string; label: string; group_key: string }>;

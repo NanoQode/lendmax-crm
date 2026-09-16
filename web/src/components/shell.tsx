@@ -4,8 +4,16 @@ import type { ComponentChildren } from 'preact';
 import { get, post, relativeTime } from '../lib/api.ts';
 import { navigate, useRoute, useTheme, type Session, type Config } from '../lib/store.ts';
 import { Avatar, Icon, ICONS } from './ui.tsx';
+import { AppointmentPrompts } from './appointment-prompts.tsx';
+import { useChatUnread } from '../lib/chat-live.ts';
 
-type NavEntry = { path: string; label: string; icon: string; permission?: string; mobile?: boolean };
+type NavEntry = {
+  path: string; label: string; icon: string; permission?: string; mobile?: boolean;
+  /** Shown in the bottom bar on a phone, where the full label does not fit. */
+  mobileLabel?: string;
+  /** Draws the unread count beside the label, WhatsApp-style. */
+  badge?: 'chat';
+};
 
 const NAV: Array<{ section?: string; items: NavEntry[] }> = [
   {
@@ -14,14 +22,17 @@ const NAV: Array<{ section?: string; items: NavEntry[] }> = [
       { path: '/customers', label: 'Customers', icon: ICONS.customers, permission: 'customer.view', mobile: true },
       { path: '/pipeline', label: 'Pipeline', icon: ICONS.board, permission: 'customer.view' },
       { path: '/tasks', label: 'Tasks', icon: ICONS.tasks, permission: 'task.view', mobile: true },
-      { path: '/calendar', label: 'Calendar', icon: ICONS.calendar, permission: 'appointment.manage', mobile: true },
+      { path: '/appointments', label: 'Appointments', icon: ICONS.calendar, permission: 'appointment.view', mobile: true },
     ],
   },
   {
     section: 'Work',
     items: [
       { path: '/messages', label: 'Messages', icon: ICONS.messages, permission: 'message.view', mobile: true },
+      { path: '/chats', label: 'LM Chats', icon: ICONS.staff, permission: 'chat.use',
+        badge: 'chat', mobile: true, mobileLabel: 'Chats' },
       { path: '/documents', label: 'Documents', icon: ICONS.documents, permission: 'document.view' },
+      { path: '/required-documents', label: 'Required documents', icon: ICONS.checklist, permission: 'required_document.view' },
       { path: '/automations', label: 'Automations', icon: ICONS.automations, permission: 'automation.view' },
       { path: '/campaigns', label: 'Campaigns', icon: ICONS.campaigns, permission: 'campaign.view' },
       { path: '/renewals', label: 'Renewals', icon: ICONS.renewals, permission: 'customer.view' },
@@ -32,7 +43,11 @@ const NAV: Array<{ section?: string; items: NavEntry[] }> = [
     items: [
       { path: '/compliance', label: 'Compliance', icon: ICONS.compliance, permission: 'compliance.view' },
       { path: '/reports', label: 'Reports', icon: ICONS.reports, permission: 'report.view' },
+      { path: '/activity', label: 'Activity logs', icon: ICONS.activity },
+      { path: '/pipelines', label: 'Manage pipelines', icon: ICONS.board, permission: 'pipeline.view' },
+      { path: '/staff', label: 'Staff', icon: ICONS.staff, permission: 'user.view' },
       { path: '/integrations', label: 'Integrations', icon: ICONS.integrations, permission: 'settings.view' },
+      { path: '/api-access', label: 'API access', icon: ICONS.key, permission: 'api_key.manage' },
       { path: '/settings', label: 'Settings', icon: ICONS.settings, permission: 'settings.view' },
     ],
   },
@@ -42,7 +57,7 @@ const visible = (items: NavEntry[], permissions: string[]) =>
   items.filter((i) => !i.permission || permissions.includes(i.permission));
 
 const isCurrent = (path: string, current: string) =>
-  path === '/' ? current === '/' : current.startsWith(path);
+  path === '/' ? current === '/' : current === path || current.startsWith(`${path}/`);
 
 export function Shell({ session, config, onSignOut, children }: {
   session: Session; config: Config | null; onSignOut: () => void; children: ComponentChildren;
@@ -70,6 +85,10 @@ export function Shell({ session, config, onSignOut, children }: {
 
   const mobileItems = NAV.flatMap((g) => g.items).filter((i) => i.mobile);
 
+  // One stream for the tab, opened only for somebody who has chats at all.
+  const chatUnread = useChatUnread(session.permissions.includes('chat.use'));
+  const badgeFor = (item: NavEntry) => (item.badge === 'chat' ? chatUnread : 0);
+
   return (
     <div class="shell">
       <nav class="sidebar" aria-label="Main">
@@ -83,14 +102,22 @@ export function Shell({ session, config, onSignOut, children }: {
           return (
             <div key={gi}>
               {group.section && <div class="nav-section">{group.section}</div>}
-              {items.map((item) => (
-                <a key={item.path} class="nav-item" href={`/crm${item.path}`}
-                   aria-current={isCurrent(item.path, path) ? 'page' : undefined}
-                   onClick={(e) => { e.preventDefault(); navigate(item.path); }}>
-                  <Icon path={item.icon} />
-                  <span>{item.label}</span>
-                </a>
-              ))}
+              {items.map((item) => {
+                const unread = badgeFor(item);
+                return (
+                  <a key={item.path} class="nav-item" href={`/crm${item.path}`}
+                     aria-current={isCurrent(item.path, path) ? 'page' : undefined}
+                     onClick={(e) => { e.preventDefault(); navigate(item.path); }}>
+                    <Icon path={item.icon} />
+                    <span>{item.label}</span>
+                    {unread > 0 && (
+                      <span class="nav-count" aria-label={`${unread} unread`}>
+                        {unread > 99 ? '99+' : unread}
+                      </span>
+                    )}
+                  </a>
+                );
+              })}
             </div>
           );
         })}
@@ -100,16 +127,23 @@ export function Shell({ session, config, onSignOut, children }: {
         <TopBar session={session} onSignOut={onSignOut} onSearch={() => setPaletteOpen(true)} />
         <main class="content">{children}</main>
       </div>
+      <AppointmentPrompts session={session} />
 
       <nav class="mobile-nav" aria-label="Main">
-        {visible(mobileItems, session.permissions).map((item) => (
-          <button key={item.path} class="mobile-nav-item"
-                  aria-current={isCurrent(item.path, path) ? 'page' : undefined}
-                  onClick={() => navigate(item.path)}>
-            <Icon path={item.icon} size={19} />
-            <span>{item.label}</span>
-          </button>
-        ))}
+        {visible(mobileItems, session.permissions).map((item) => {
+          const unread = badgeFor(item);
+          return (
+            <button key={item.path} class="mobile-nav-item"
+                    aria-current={isCurrent(item.path, path) ? 'page' : undefined}
+                    onClick={() => navigate(item.path)}>
+              <span class="mobile-nav-icon">
+                <Icon path={item.icon} size={19} />
+                {unread > 0 && <span class="nav-dot" aria-label={`${unread} unread`} />}
+              </span>
+              <span>{item.mobileLabel ?? item.label}</span>
+            </button>
+          );
+        })}
         <button class="mobile-nav-item" onClick={() => setPaletteOpen(true)}>
           <Icon path={ICONS.search} size={19} />
           <span>Search</span>
@@ -174,7 +208,8 @@ function TopBar({ session, onSignOut, onSearch }: {
       <div style={{ position: 'relative' }}>
         <button class="btn btn-ghost" onClick={() => { setMenuOpen((v) => !v); setNotifOpen(false); }}
                 aria-haspopup="menu" aria-expanded={menuOpen} style={{ gap: 8 }}>
-          <Avatar name={session.user.name} />
+          <Avatar name={session.user.name}
+                  src={(session.profile as { photo?: string | null } | null)?.photo ?? null} />
           <span style={{ fontWeight: 550 }}>{session.user.name}</span>
         </button>
         {menuOpen && (
@@ -237,7 +272,9 @@ function Notifications({ onClose }: { onClose: () => void }) {
       {items?.map((n) => (
         <button key={String(n.id)} class="menu-item" style={{ alignItems: 'flex-start' }}
                 onClick={() => {
-                  if (n.entity_type === 'application' && n.entity_id) {
+                  if (typeof n.link === 'string' && n.link.startsWith('/')) {
+                    navigate(n.link);
+                  } else if (n.entity_type === 'application' && n.entity_id) {
                     navigate(`/applications/${n.entity_id}`);
                   }
                   onClose();
@@ -286,15 +323,22 @@ function CommandPalette({ config, permissions, onClose }: {
       { id: 'go-dash', label: 'Go to Dashboard', hint: 'Navigate', run: () => navigate('/') },
       { id: 'go-cust', label: 'Go to Customers', hint: 'Navigate', permission: 'customer.view', run: () => navigate('/customers') },
       { id: 'go-pipe', label: 'Go to Pipeline', hint: 'Navigate', permission: 'customer.view', run: () => navigate('/pipeline') },
+      { id: 'go-pipelines', label: 'Manage pipelines', hint: 'Navigate', permission: 'pipeline.view', run: () => navigate('/pipelines') },
+      { id: 'go-appointments', label: 'Go to Appointments', hint: 'Navigate', permission: 'appointment.view', run: () => navigate('/appointments') },
+      { id: 'new-appointment', label: 'Book an appointment', hint: 'Create', permission: 'appointment.manage', run: () => navigate('/appointments?new=1') },
       { id: 'go-tasks', label: 'Go to Tasks', hint: 'Navigate', permission: 'task.view', run: () => navigate('/tasks') },
       { id: 'new-cust', label: 'New customer', hint: 'Create', permission: 'customer.create', run: () => navigate('/customers?new=1') },
       { id: 'go-messages', label: 'Go to Messages', hint: 'Navigate', permission: 'message.view', run: () => navigate('/messages') },
       { id: 'go-docs', label: 'Go to Documents', hint: 'Navigate', permission: 'document.view', run: () => navigate('/documents') },
+      { id: 'go-required-docs', label: 'Go to Required documents', hint: 'Navigate', permission: 'required_document.view', run: () => navigate('/required-documents') },
+      { id: 'go-activity', label: 'Go to Activity logs', hint: 'Navigate', run: () => navigate('/activity') },
       { id: 'go-reports', label: 'Go to Reports', hint: 'Navigate', permission: 'report.view', run: () => navigate('/reports') },
       { id: 'go-auto', label: 'Go to Automations', hint: 'Navigate', permission: 'automation.view', run: () => navigate('/automations') },
       { id: 'new-auto', label: 'New automation', hint: 'Create', permission: 'automation.edit', run: () => navigate('/automations?new=1') },
       { id: 'go-compliance', label: 'Go to Compliance', hint: 'Navigate', permission: 'compliance.view', run: () => navigate('/compliance') },
       { id: 'go-settings', label: 'Go to Settings', hint: 'Navigate', permission: 'settings.view', run: () => navigate('/settings') },
+      { id: 'go-staff', label: 'Go to Staff', hint: 'Navigate', permission: 'user.view', run: () => navigate('/staff') },
+      { id: 'go-api', label: 'Go to API access', hint: 'Navigate', permission: 'api_key.manage', run: () => navigate('/api-access') },
     ];
     return all.filter((c) => !c.permission || permissions.includes(c.permission));
   }, [permissions]);

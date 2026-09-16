@@ -28,12 +28,20 @@ import { complianceRoutes } from './routes/compliance.ts';
 import { fundingRoutes } from './routes/funding.ts';
 import { campaignRoutes } from './routes/campaigns.ts';
 import { reportRoutes } from './routes/reports.ts';
-import { calendarRoutes } from './routes/calendar.ts';
+import { appointmentRoutes } from './routes/appointments.ts';
 import { settingsRoutes } from './routes/settings.ts';
 import { messageRoutes } from './routes/messages.ts';
 import { integrationRoutes } from './routes/integrations.ts';
 import { documentRoutes } from './routes/documents.ts';
 import { publicRoutes } from './routes/public.ts';
+import { staffRoutes } from './routes/staff.ts';
+import { apiV1Routes } from './routes/api-v1.ts';
+import { requiredDocumentRoutes } from './routes/required-documents.ts';
+import { pipelineRoutes } from './routes/pipelines.ts';
+import { activityRoutes } from './routes/activity.ts';
+import { chatRoutes } from './routes/chats.ts';
+import { taskRoutes } from './routes/tasks.ts';
+import { applicationFormRoutes } from './routes/application-form.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = path.resolve(here, '../../web/public');
@@ -133,19 +141,34 @@ export function createApp(): Express {
   // Mounted before attachUser because there is no user behind these calls.
   api.use('/internal', internalRoutes);
 
+  // The public API for connected websites, authenticated by API key. Also
+  // before attachUser: a website has no session, and a cookie that happens to
+  // ride along must not turn an API call into a staff member's call.
+  api.use('/v1', apiV1Routes);
+
   api.use('/auth', authRoutes);
   api.use(attachUser);
+  // First after attachUser: the Google callback is a browser redirect that
+  // must not meet another router's JSON "sign in" answer on the way.
+  api.use('/', appointmentRoutes);
   api.use('/', systemRoutes);
   api.use('/', dashboardRoutes);
   api.use('/', customerRoutes);
+  api.use('/', taskRoutes);
+  // Ahead of customerRoutes, which owns the rest of /applications/:id.
+  api.use('/', applicationFormRoutes);
   api.use('/', workRoutes);
   api.use('/', automationRoutes);
   api.use('/', complianceRoutes);
   api.use('/', fundingRoutes);
   api.use('/', campaignRoutes);
   api.use('/', reportRoutes);
-  api.use('/', calendarRoutes);
   api.use('/', settingsRoutes);
+  api.use('/', staffRoutes);
+  api.use('/', requiredDocumentRoutes);
+  api.use('/', pipelineRoutes);
+  api.use('/', activityRoutes);
+  api.use('/', chatRoutes);
   api.use('/', messageRoutes);
   api.use('/', integrationRoutes);
   api.use('/', documentRoutes);

@@ -37,11 +37,16 @@ const AUDIENCE_FROM = `
   LEFT JOIN LATERAL (
     SELECT a.* FROM applications a
      WHERE a.customer_id = c.id
-     ORDER BY (a.stage_key NOT IN ('funded','lost')) DESC, a.created_at DESC
+     -- The file still in play first, judged by what its stage means rather
+     -- than by its key, so a renamed or added stage is not misread.
+     ORDER BY COALESCE((SELECT s.category NOT IN ('won','lost') FROM pipeline_stages s
+                         WHERE s.organization_id = a.organization_id AND s.key = a.stage_key), true) DESC,
+              a.created_at DESC
      LIMIT 1
   ) app ON TRUE
   LEFT JOIN pipeline_stages ps
          ON ps.organization_id = c.organization_id AND ps.key = app.stage_key
+  LEFT JOIN pipelines pl ON pl.id = app.pipeline_id
   LEFT JOIN LATERAL (
     SELECT r.* FROM renewal_records r
      WHERE r.customer_id = c.id AND r.status IN ('upcoming','engaged','in_progress')
@@ -102,7 +107,10 @@ export async function buildAudience(
                         'channel', k.channel, 'purpose', k.purpose, 'basis', k.basis,
                         'granted', k.granted, 'collected_at', k.collected_at,
                         'expires_at', k.expires_at))
-                        FROM consents k WHERE k.customer_id = c.id), '[]'::jsonb) AS consents,
+                        FROM consents k
+                       WHERE k.customer_id = c.id
+                          OR k.customer_id IN (SELECT m.id FROM customers m WHERE m.merged_into_id = c.id)),
+                     '[]'::jsonb) AS consents,
             COALESCE((SELECT jsonb_agg(jsonb_build_object(
                         'channel', s.channel, 'scope', s.scope, 'reason', s.reason,
                         'address', s.address, 'removed_at', s.removed_at))

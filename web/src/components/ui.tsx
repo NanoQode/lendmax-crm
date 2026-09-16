@@ -1,6 +1,6 @@
 /** Shared presentational pieces. */
 import type { ComponentChildren } from 'preact';
-import { useEffect, useRef } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { avatarColour, initials } from '../lib/api.ts';
 
 export function Badge({ tone = 'neutral', children }: {
@@ -41,10 +41,24 @@ export function Urgency({ value, settled = false }: {
   );
 }
 
-export function Avatar({ name, title }: { name: string; title?: string }) {
+/**
+ * A person, as a face or as their initials.
+ *
+ * `src` is a picture they have uploaded. Everybody starts without one, so the
+ * coloured initials are the normal case rather than a fallback for failure —
+ * and if a picture ever fails to load, it quietly becomes them again.
+ */
+export function Avatar({ name, title, src }: { name: string; title?: string; src?: string | null }) {
+  const [broken, setBroken] = useState(false);
+  const label = title ?? name;
+  if (src && !broken) {
+    return (
+      <img class="avatar avatar-photo" src={src} alt="" title={label} aria-label={label}
+           loading="lazy" onError={() => setBroken(true)} />
+    );
+  }
   return (
-    <span class="avatar" style={{ background: avatarColour(name) }} title={title ?? name}
-          aria-label={title ?? name}>
+    <span class="avatar" style={{ background: avatarColour(name) }} title={label} aria-label={label}>
       {initials(name)}
     </span>
   );
@@ -135,11 +149,17 @@ export function ErrorNote({ error, onRetry, code, permission }: {
  * A modal that behaves like one: Escape closes it, focus moves inside on open
  * and back to the trigger on close, and a click on the backdrop dismisses it.
  */
-export function Modal({ title, onClose, children, footer }: {
+export function Modal({ title, onClose, children, footer, wide = false }: {
   title: string; onClose: () => void; children: ComponentChildren; footer?: ComponentChildren;
+  wide?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const returnTo = useRef<HTMLElement | null>(null);
+  // The latest close handler, read at key time. Depending on it directly
+  // re-ran the setup below on every parent render — and the setup moves focus
+  // to the first field, so typing in the third field jumped back to the first.
+  const close = useRef(onClose);
+  close.current = onClose;
 
   useEffect(() => {
     returnTo.current = document.activeElement as HTMLElement | null;
@@ -149,7 +169,14 @@ export function Modal({ title, onClose, children, footer }: {
     focusable?.focus();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
+      // Only the topmost dialog answers the keyboard: Escape in a dialog opened
+      // from another closes that one, not both.
+      const open = document.querySelectorAll('.modal');
+      if (open[open.length - 1] !== ref.current) return;
+      // Escape inside an open dropdown closes the dropdown, not the dialog
+      // around it — the dropdown's own handler deals with it.
+      if (e.key === 'Escape' && (e.target as HTMLElement)?.closest?.('[data-popover-open="true"]')) return;
+      if (e.key === 'Escape') { e.stopPropagation(); close.current(); }
       if (e.key === 'Tab' && ref.current) {
         // Trap: without it, Tab walks out of the dialog into the page behind,
         // which for a screen-reader user means the dialog silently vanishes.
@@ -167,11 +194,12 @@ export function Modal({ title, onClose, children, footer }: {
       document.removeEventListener('keydown', onKey, true);
       returnTo.current?.focus?.();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div class="overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div class="modal" ref={ref} role="dialog" aria-modal="true" aria-label={title}>
+      <div class={`modal${wide ? ' modal-wide' : ''}`} ref={ref} role="dialog" aria-modal="true"
+           aria-label={title}>
         <div class="modal-head"><h2>{title}</h2></div>
         <div class="modal-body">{children}</div>
         {footer && <div class="modal-foot">{footer}</div>}
@@ -181,7 +209,9 @@ export function Modal({ title, onClose, children, footer }: {
 }
 
 export function Field({ label, error, hint, children }: {
-  label: string; error?: string; hint?: string; children: ComponentChildren;
+  // Rich rather than a plain string: the application form hangs a "corrected
+  // by the brokerage · undo" marker off the label of the field it belongs to.
+  label: ComponentChildren; error?: string; hint?: string; children: ComponentChildren;
 }) {
   return (
     <div class="field">
@@ -190,6 +220,191 @@ export function Field({ label, error, hint, children }: {
       {hint && !error && <div class="text-sm text-muted" style={{ marginTop: 4 }}>{hint}</div>}
       {error && <div class="field-error">{error}</div>}
     </div>
+  );
+}
+
+// ── Searchable select ──────────────────────────────────────────────────────
+
+export type SelectOption = { value: string; label: string; hint?: string; disabled?: boolean };
+
+/** Case- and accent-insensitive, so "gagnon" finds "Gagnón" and "mc" finds "McKay". */
+const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+/**
+ * The dropdown every select in the CRM uses: type to filter, arrow keys to
+ * move, Enter to choose, Escape to close. A plain <select> cannot be searched,
+ * and a staff list or a list of lenders is long enough that scrolling it is
+ * the slow part of the job.
+ *
+ * The panel is position: fixed, placed against the trigger, so it is never
+ * clipped by the scrolling body of a modal; it opens upwards when there is no
+ * room below.
+ */
+export function SearchSelect({
+  value, options, onChange, placeholder = 'Choose…', searchPlaceholder = 'Type to search…',
+  ariaLabel, id, disabled = false, invalid = false, emptyText = 'Nothing matches that.',
+}: {
+  value: string | null | undefined;
+  options: SelectOption[];
+  onChange: (value: string) => void;
+  placeholder?: string;
+  searchPlaceholder?: string;
+  ariaLabel?: string;
+  id?: string;
+  disabled?: boolean;
+  invalid?: boolean;
+  emptyText?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [term, setTerm] = useState('');
+  const [active, setActive] = useState(0);
+  const [pos, setPos] = useState<{ left: number; width: number; top?: number; bottom?: number; max: number } | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listId = useMemo(() => `ss-${Math.random().toString(36).slice(2, 9)}`, []);
+
+  const selected = options.find((o) => o.value === value);
+  const needle = fold(term.trim());
+  const filtered = needle
+    ? options.filter((o) => fold(`${o.label} ${o.hint ?? ''}`).includes(needle))
+    : options;
+
+  const place = () => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const below = window.innerHeight - r.bottom - 10;
+    const above = r.top - 10;
+    const up = below < 240 && above > below;
+    setPos({
+      left: Math.min(r.left, window.innerWidth - Math.max(r.width, 240) - 8),
+      width: Math.max(r.width, 240),
+      ...(up ? { bottom: window.innerHeight - r.top + 4 } : { top: r.bottom + 4 }),
+      max: Math.max(160, Math.min(340, up ? above : below)),
+    });
+  };
+
+  const openPanel = (initial = '') => {
+    if (disabled) return;
+    place();
+    setTerm(initial);
+    const index = options.findIndex((o) => o.value === value);
+    setActive(initial ? 0 : Math.max(0, index));
+    setOpen(true);
+  };
+
+  const close = (refocus = true) => {
+    setOpen(false);
+    if (refocus) triggerRef.current?.focus();
+  };
+
+  useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!panelRef.current?.contains(t) && !triggerRef.current?.contains(t)) setOpen(false);
+    };
+    const onMove = (e: Event) => {
+      // Scrolling the list itself is not a reason to reposition it.
+      if (panelRef.current?.contains(e.target as Node)) return;
+      place();
+    };
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('resize', onMove);
+    window.addEventListener('scroll', onMove, true);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      window.removeEventListener('resize', onMove);
+      window.removeEventListener('scroll', onMove, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    panelRef.current?.querySelector(`[data-index="${active}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [active, open]);
+
+  const choose = (o: SelectOption) => {
+    if (o.disabled) return;
+    onChange(o.value);
+    close();
+  };
+
+  const onSearchKey = (e: KeyboardEvent) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, filtered.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+    else if (e.key === 'Home') { e.preventDefault(); setActive(0); }
+    else if (e.key === 'End') { e.preventDefault(); setActive(filtered.length - 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); const o = filtered[active]; if (o) choose(o); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === 'Tab') close(false);
+  };
+
+  const onTriggerKey = (e: KeyboardEvent) => {
+    if (open) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openPanel();
+    } else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // Typing on the closed control starts a search, the way a native
+      // select jumps to a letter.
+      e.preventDefault();
+      openPanel(e.key);
+    }
+  };
+
+  return (
+    <div class="ss" data-popover-open={open ? 'true' : undefined}>
+      <button type="button" ref={triggerRef} id={id} disabled={disabled}
+              class={`ss-trigger${invalid ? ' ss-invalid' : ''}`}
+              aria-haspopup="listbox" aria-expanded={open} aria-label={ariaLabel}
+              aria-invalid={invalid || undefined}
+              onClick={() => (open ? close() : openPanel())} onKeyDown={onTriggerKey}>
+        <span class={selected ? 'ss-value' : 'ss-value ss-placeholder'}>
+          {selected?.label ?? placeholder}
+        </span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+      </button>
+      {open && pos && (
+        <div ref={panelRef} class="ss-panel" data-popover-open="true"
+             style={{ left: pos.left, width: pos.width, top: pos.top, bottom: pos.bottom }}>
+          <input ref={inputRef} class="ss-search" value={term} placeholder={searchPlaceholder}
+                 role="combobox" aria-expanded aria-controls={listId} aria-autocomplete="list"
+                 aria-label={ariaLabel ? `Search ${ariaLabel.toLowerCase()}` : 'Search'}
+                 aria-activedescendant={filtered[active] ? `${listId}-${active}` : undefined}
+                 onInput={(e) => { setTerm((e.target as HTMLInputElement).value); setActive(0); }}
+                 onKeyDown={onSearchKey} />
+          <ul id={listId} role="listbox" class="ss-list" style={{ maxHeight: pos.max - 46 }}>
+            {filtered.length === 0 && <li class="ss-empty">{emptyText}</li>}
+            {filtered.map((o, i) => (
+              <li key={o.value} id={`${listId}-${i}`} data-index={i} role="option"
+                  aria-selected={o.value === value} aria-disabled={o.disabled || undefined}
+                  class="ss-option" data-active={i === active}
+                  onMouseEnter={() => setActive(i)}
+                  onMouseDown={(e) => { e.preventDefault(); choose(o); }}>
+                <span class="ss-check" aria-hidden="true">{o.value === value ? '✓' : ''}</span>
+                <span class="ss-label">{o.label}</span>
+                {o.hint && <span class="ss-hint">{o.hint}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** An on/off control that says what it is to a screen reader. */
+export function Switch({ checked, onChange, label, disabled = false }: {
+  checked: boolean; onChange: (next: boolean) => void; label: string; disabled?: boolean;
+}) {
+  return (
+    <button type="button" role="switch" class="switch" aria-checked={checked} aria-label={label}
+            disabled={disabled} onClick={(e) => { e.stopPropagation(); onChange(!checked); }}>
+      <span class="switch-thumb" aria-hidden="true" />
+    </button>
   );
 }
 
@@ -220,4 +435,10 @@ export const ICONS = {
   plus: 'M12 5v14M5 12h14',
   back: 'M19 12H5M12 19l-7-7 7-7',
   integrations: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+  staff: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6',
+  key: 'M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4',
+  checklist: 'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 13l2 2 4-4',
+  more: 'M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+  activity: 'M22 12h-4l-3 9L9 3l-3 9H2',
+  copy: 'M20 9h-9a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2zM5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1',
 };

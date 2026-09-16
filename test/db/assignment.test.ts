@@ -9,7 +9,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool, query, withTransaction } from '../../src/db/pool.ts';
 import { migrate } from '../../src/db/migrate.ts';
-import { applyAssignmentRules } from '../../src/services/assignment.ts';
+import { applyAssignmentRules, roundRobinStatus, setRoundRobin } from '../../src/services/assignment.ts';
 
 let orgId: string;
 let users: string[] = [];
@@ -28,9 +28,10 @@ beforeEach(async () => {
   users = [];
   for (const name of ['Ann', 'Ben', 'Cara']) {
     const { rows } = await query<{ id: string }>(
-      `INSERT INTO users (organization_id, email, name, role, active)
-       VALUES ($1,$2,$3,'broker',true) RETURNING id`,
-      [orgId, `${name.toLowerCase()}@example.com`, name],
+      `INSERT INTO users (organization_id, email, name, role, active, activated_at,
+                          round_robin_enabled, created_at)
+       VALUES ($1,$2,$3,'broker',true,now(),true, now() + ($4 || ' seconds')::interval) RETURNING id`,
+      [orgId, `${name.toLowerCase()}@example.com`, name, String(users.length)],
     );
     users.push(rows[0]!.id);
   }
@@ -166,4 +167,74 @@ test('roles are independent', async () => {
   const assigned = await apply();
   assert.equal(assigned.length, 2);
   assert.deepEqual(assigned.map((a) => a.role).sort(), ['broker', 'underwriter']);
+});
+
+// ── Round robin by the per-person switch ──────────────────────────────────
+
+const newFile = async () => {
+  const { rows } = await query<{ id: string }>(
+    `INSERT INTO applications (organization_id, customer_id, property_province)
+     SELECT $1, id, 'ON' FROM customers LIMIT 1 RETURNING id`,
+    [orgId],
+  );
+  applicationId = rows[0]!.id;
+  return (await apply())[0]?.userId ?? null;
+};
+
+test('the staff round robin takes turns among everybody switched on', async () => {
+  await withTransaction((c) => setRoundRobin(c, orgId, true));
+  const picked = [];
+  for (let i = 0; i < 6; i++) picked.push(await newFile());
+  assert.deepEqual(picked, [...users, ...users], 'each in turn, then round again');
+});
+
+test('somebody with round robin off is skipped but stays assignable by hand', async () => {
+  await withTransaction((c) => setRoundRobin(c, orgId, true));
+  await query('UPDATE users SET round_robin_enabled = false WHERE id = $1', [users[1]]);
+  const picked = [];
+  for (let i = 0; i < 4; i++) picked.push(await newFile());
+  assert.equal(picked.includes(users[1]!), false);
+  assert.deepEqual([...new Set(picked)].sort(), [users[0], users[2]].sort());
+});
+
+test('nobody who has not activated their account is handed a lead', async () => {
+  await withTransaction((c) => setRoundRobin(c, orgId, true));
+  await query('UPDATE users SET activated_at = NULL WHERE id = ANY($1::uuid[])', [[users[0], users[1]]]);
+  for (let i = 0; i < 3; i++) assert.equal(await newFile(), users[2]);
+});
+
+test('switching somebody back on does not hand them a run of leads', async () => {
+  await withTransaction((c) => setRoundRobin(c, orgId, true));
+  for (let i = 0; i < 3; i++) await newFile();           // everyone has had one
+  await query('UPDATE users SET round_robin_enabled = false WHERE id = $1', [users[0]]);
+  await newFile(); await newFile();                        // Ben, Cara
+  await query('UPDATE users SET round_robin_enabled = true WHERE id = $1', [users[0]]);
+  const next = [await newFile(), await newFile(), await newFile()];
+  assert.deepEqual(next, [users[0], users[1], users[2]],
+    'Ann rejoins at her place, not at the front for several turns');
+});
+
+test('round robin off means new leads wait unassigned', async () => {
+  await withTransaction((c) => setRoundRobin(c, orgId, true));
+  await withTransaction((c) => setRoundRobin(c, orgId, false));
+  assert.equal(await newFile(), null);
+  const status = await roundRobinStatus(pool, orgId);
+  assert.equal(status.enabled, false);
+  assert.equal(status.pool.length, 3, 'the people are still there for when it is turned back on');
+});
+
+test('two leads claimed in one transaction go to two different people', async () => {
+  await withTransaction((c) => setRoundRobin(c, orgId, true));
+  const both = await withTransaction(async (client) => {
+    const ids: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO applications (organization_id, customer_id, property_province)
+         SELECT $1, id, 'ON' FROM customers LIMIT 1 RETURNING id`, [orgId]);
+      const [a] = await applyAssignmentRules(client, orgId, { applicationId: rows[0]!.id });
+      ids.push(a!.userId);
+    }
+    return ids;
+  });
+  assert.notEqual(both[0], both[1]);
 });

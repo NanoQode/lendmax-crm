@@ -7,16 +7,27 @@
  * — without opening a tab. So the header carries the facts and the tabs carry
  * the detail, never the other way round.
  */
-import { useState } from 'preact/hooks';
-import { ApiError, formatDate, money, post, relativeTime } from '../lib/api.ts';
+import { useEffect, useState } from 'preact/hooks';
+import { ApiError, formatDate, formatDateTime, money, post, relativeTime } from '../lib/api.ts';
 import { navigate, toast, useAsync, type Config, type Session } from '../lib/store.ts';
 import {
-  Avatar, Badge, Empty, ErrorNote, Field, Icon, ICONS, Modal, Skeleton, Urgency,
+  Avatar, Badge, Empty, ErrorNote, Field, Icon, ICONS, Modal, SearchSelect, Skeleton, Urgency,
+  type SelectOption,
 } from '../components/ui.tsx';
+import { hasSeveralPipelines, stageOptions } from '../lib/pipelines.ts';
+import { DataTable, recency } from '../components/data-table.tsx';
 import { ClientAutomations } from './automations.tsx';
 import { ComplianceTab } from './compliance.tsx';
 import { CommunicationTab } from './messages.tsx';
 import { FundingTab } from './funding.tsx';
+import { FileAppointments } from './appointments.tsx';
+import { FileTasks } from './tasks.tsx';
+import { ApplicationForm } from './application-form.tsx';
+import { DocumentRequestPanel } from './document-requests.tsx';
+import { SendToScarlett } from './scarlett-send.tsx';
+import {
+  ArchiveFile, EditContact, MergeCustomer, useCustomerRecord, type RecordPayload,
+} from './customer-record.tsx';
 
 type Workspace = {
   application: Record<string, any>;
@@ -35,13 +46,17 @@ type Workspace = {
   financials_hidden_reason: string | null;
 };
 
-const TABS = [
+/** A tab with a permission is only offered to those who hold it. */
+const TABS: Array<{ key: string; label: string; permission?: string }> = [
+  { key: 'summary', label: 'Summary' },
   { key: 'application', label: 'Application' },
-  { key: 'compliance', label: 'Compliance' },
+  { key: 'compliance', label: 'Compliance', permission: 'compliance.view' },
   { key: 'communication', label: 'Communication' },
   { key: 'documents', label: 'Documents' },
-  { key: 'funding', label: 'Funding' },
-  { key: 'notes', label: 'Notes & Tasks' },
+  { key: 'funding', label: 'Funding', permission: 'funding.view' },
+  { key: 'tasks', label: 'Tasks' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'appointments', label: 'Appointments' },
   { key: 'automations', label: 'Automations' },
   { key: 'log', label: 'Log' },
 ];
@@ -51,6 +66,13 @@ export function ClientPage({ id, session, config }: {
 }) {
   const [tab, setTab] = useState('application');
   const [movingStage, setMovingStage] = useState(false);
+  const [changingPipeline, setChangingPipeline] = useState(false);
+  const [assigning, setAssigning] = useState(false);
+  const [bookRequested, setBookRequested] = useState(false);
+  const [editingContact, setEditingContact] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [sendingScarlett, setSendingScarlett] = useState(false);
   const state = useAsync<Workspace>(`/applications/${id}`);
 
   if (state.status === 'loading') {
@@ -69,6 +91,7 @@ export function ClientPage({ id, session, config }: {
   }
 
   const { application: app, assignments, compliance, conditions } = state.data;
+  const can = (p: string) => session.permissions.includes(p);
   const name = `${app.first_name ?? ''} ${app.last_name ?? ''}`.trim() || 'Unnamed client';
   const property = [
     [app.property_street_number, app.property_street_name].filter(Boolean).join(' '),
@@ -78,6 +101,7 @@ export function ClientPage({ id, session, config }: {
     ?? app.transaction_type_key ?? 'Type not set';
   const outstandingConditions = conditions.filter((c) => c.status === 'outstanding').length;
   const primary = (role: string) => assignments.find((a) => a.role === role && a.is_primary);
+  const pipelineName = config?.pipelines.find((p) => p.id === app.pipeline_id)?.name ?? null;
 
   return (
     <div style={{ margin: '-20px -20px 0' }}>
@@ -89,9 +113,12 @@ export function ClientPage({ id, session, config }: {
 
         <div class="client-title">
           <h1>{name}</h1>
-          <span class="badge badge-accent">{app.stage_label ?? 'No stage'}</span>
+          <span class="badge badge-accent">
+            {hasSeveralPipelines(config) && pipelineName ? `${pipelineName} · ` : ''}{app.stage_label ?? 'No stage'}
+          </span>
           {compliance?.legal_hold && <Badge tone="danger">Legal hold</Badge>}
           {app.awaiting_reply_since && <Badge tone="danger">Awaiting our reply</Badge>}
+          {app.archived_at && <Badge tone="neutral">Archived {formatDate(app.archived_at)}</Badge>}
         </div>
         <div class="client-sub">
           {type} · {money(app.amount_requested)} mortgage{property ? ` · ${property}` : ''}
@@ -105,13 +132,23 @@ export function ClientPage({ id, session, config }: {
           <Fact label="Application">
             {app.percent_complete}% complete
           </Fact>
-          <Fact label="Broker">{primary('broker')?.name ?? '—'}</Fact>
+          <Fact label="Assigned to">
+            <span class="row" style={{ gap: 6 }}>
+              <span>{primary('broker')?.name ?? <span class="text-muted">Unassigned</span>}</span>
+              {session.permissions.includes('pipeline.assign') && (
+                <button class="link-button text-sm" onClick={() => setAssigning(true)}>
+                  {primary('broker') ? 'Change' : 'Assign'}
+                </button>
+              )}
+            </span>
+          </Fact>
           <Fact label="Underwriter">{primary('underwriter')?.name ?? '—'}</Fact>
           <Fact label="Scarlett">
             {app.scarlett_deal_id
               ? <span class="row" style={{ gap: 6 }}>
                   <span>{app.scarlett_deal_id}</span>
                   {app.scarlett_sync_state === 'error' && <Badge tone="danger">Sync failed</Badge>}
+                  {app.scarlett_sync_state === 'stale' && <Badge tone="warn">Check in Scarlett</Badge>}
                 </span>
               : 'Not submitted'}
           </Fact>
@@ -131,6 +168,11 @@ export function ClientPage({ id, session, config }: {
               : 'Not started'}
           </Fact>
           <Fact label="Last contact">{relativeTime(app.last_contacted_at)}</Fact>
+          <Fact label="Next meeting">
+            {app.next_appointment_at
+              ? <button class="link-button" onClick={() => setTab('appointments')}>{formatDateTime(app.next_appointment_at)}</button>
+              : 'None booked'}
+          </Fact>
         </div>
 
         <div class="client-actions">
@@ -145,14 +187,42 @@ export function ClientPage({ id, session, config }: {
                   onClick={() => setTab('communication')}>Text</button>
           <a class="btn" href={app.phone_e164 ? `tel:${app.phone_e164}` : undefined}
              aria-disabled={!app.phone_e164}>Call</a>
+          {(session.permissions.includes('appointment.manage') || session.permissions.includes('appointment.manage_all')) && (
+            <button class="btn" onClick={() => { setTab('appointments'); setBookRequested(true); }}>Book appointment</button>
+          )}
+          {(session.permissions.includes('task.manage') || session.permissions.includes('task.manage_all')) && (
+            <button class="btn" onClick={() => setTab('tasks')}>Add task</button>
+          )}
+          {can('customer.edit') && (
+            <button class="btn" onClick={() => setEditingContact(true)}>Edit contact</button>
+          )}
+          {can('customer.merge') && (
+            <button class="btn" onClick={() => setMerging(true)}>Merge duplicate</button>
+          )}
+          {can('customer.delete') && (
+            <button class="btn" onClick={() => setArchiving(true)}>{app.archived_at ? 'Restore file' : 'Archive'}</button>
+          )}
+          {can('scarlett.push') && !app.archived_at && (
+            <button class={`btn${app.scarlett_deal_id ? '' : ' btn-primary'}`} onClick={() => setSendingScarlett(true)}>
+              {app.scarlett_deal_id ? 'Re-send to Scarlett' : 'Send to Scarlett'}
+            </button>
+          )}
           {session.permissions.includes('pipeline.move') && (
-            <button class="btn btn-primary" onClick={() => setMovingStage(true)}>Move stage</button>
+            <>
+              {hasSeveralPipelines(config) && (
+                <button class="btn" onClick={() => setChangingPipeline(true)}>Change pipeline</button>
+              )}
+              <button class="btn btn-primary" onClick={() => setMovingStage(true)}>Move stage</button>
+            </>
           )}
         </div>
+        <RecordNotices customerId={String(app.customer_id)} archived={!!app.archived_at}
+                       canMerge={can('customer.merge')} canRestore={can('customer.delete')}
+                       onMerge={() => setMerging(true)} onRestore={() => setArchiving(true)} />
       </header>
 
       <div class="tabs" role="tablist">
-        {TABS.map((t) => (
+        {TABS.filter((t) => !t.permission || session.permissions.includes(t.permission)).map((t) => (
           <button key={t.key} class="tab" role="tab" aria-selected={tab === t.key}
                   onClick={() => setTab(t.key)}>
             {t.label}
@@ -161,12 +231,18 @@ export function ClientPage({ id, session, config }: {
       </div>
 
       <div style={{ padding: 20 }}>
-        {tab === 'application' && <ApplicationTab data={state.data} />}
+        {tab === 'summary' && <ApplicationTab data={state.data} />}
+        {tab === 'application' && <ApplicationForm id={id} session={session} onDocumentsRequested={state.reload} />}
+        {tab === 'tasks' && <FileTasks applicationId={id} session={session} />}
         {tab === 'notes' && <NotesTab id={id} session={session} />}
+        {tab === 'appointments' && (
+          <FileAppointments applicationId={id} session={session} clientName={name} hostId={primary('broker')?.user_id ?? null} bookRequested={bookRequested}
+                            onBookingOpened={() => setBookRequested(false)} onChanged={state.reload} />
+        )}
         {tab === 'log' && <LogTab id={id} />}
-        {tab === 'documents' && <DocumentsTab data={state.data} id={id} session={session} />}
-        {tab === 'compliance' && <ComplianceTab applicationId={id} session={session} />}
-        {tab === 'funding' && <FundingTab applicationId={id} session={session} config={config} />}
+        {tab === 'documents' && <DocumentsTab data={state.data} id={id} session={session} onChanged={state.reload} />}
+        {tab === 'compliance' && session.permissions.includes('compliance.view') && <ComplianceTab applicationId={id} session={session} />}
+        {tab === 'funding' && session.permissions.includes('funding.view') && <FundingTab applicationId={id} session={session} config={config} />}
         {tab === 'automations' && (
           <ClientAutomations customerId={String(app.customer_id)} session={session} />
         )}
@@ -176,10 +252,87 @@ export function ClientPage({ id, session, config }: {
         )}
       </div>
 
+      {assigning && (
+        <AssignLead id={id} current={primary('broker') ?? null} clientName={name}
+                    onClose={() => setAssigning(false)}
+                    onAssigned={() => { setAssigning(false); state.reload(); }} />
+      )}
+      {editingContact && (
+        <CustomerModal customerId={String(app.customer_id)} onClose={() => setEditingContact(false)} render={(record, reload) => (
+          <EditContact customer={record.customer} onClose={() => setEditingContact(false)}
+                       onSaved={() => { setEditingContact(false); reload(); state.reload(); }} />
+        )} />
+      )}
+      {merging && (
+        <CustomerModal customerId={String(app.customer_id)} onClose={() => setMerging(false)} render={(record, reload) => (
+          <MergeCustomer customer={record.customer} duplicates={record.duplicates}
+                         onClose={() => setMerging(false)}
+                         onMerged={() => { setMerging(false); reload(); state.reload(); }} />
+        )} />
+      )}
+      {sendingScarlett && (
+        <SendToScarlett applicationId={id} session={session}
+                        onClose={() => setSendingScarlett(false)}
+                        onSent={() => { setSendingScarlett(false); state.reload(); }} />
+      )}
+      {archiving && (
+        <ArchiveFile applicationId={id} archived={!!app.archived_at} clientName={name}
+                     onClose={() => setArchiving(false)}
+                     onDone={() => { setArchiving(false); state.reload(); }} />
+      )}
       {movingStage && (
-        <MoveStage id={id} current={app.stage_key} config={config}
+        <MoveStage id={id} current={app.stage_key} config={config} pipelineId={app.pipeline_id}
                    onClose={() => setMovingStage(false)}
                    onMoved={() => { setMovingStage(false); state.reload(); }} />
+      )}
+      {changingPipeline && (
+        <MoveStage id={id} current={app.stage_key} config={config} pipelineId={app.pipeline_id} changePipeline
+                   onClose={() => setChangingPipeline(false)}
+                   onMoved={() => { setChangingPipeline(false); state.reload(); }} />
+      )}
+    </div>
+  );
+}
+
+/** Loads the customer record, then renders a modal that needs it. */
+function CustomerModal({ customerId, render, onClose }: {
+  customerId: string; onClose: () => void;
+  render: (record: RecordPayload, reload: () => void) => any;
+}) {
+  const record = useCustomerRecord(customerId);
+  if (record.status === 'error') {
+    return (
+      <Modal title="Customer record" onClose={onClose}>
+        <ErrorNote error={record.error} code={record.code} permission={record.permission} onRetry={record.reload} />
+      </Modal>
+    );
+  }
+  return record.status === 'ready' ? render(record.data, record.reload) : null;
+}
+
+/** Said at the top of the file: it is archived, or somebody else looks like the same person. */
+function RecordNotices({ customerId, archived, canMerge, canRestore, onMerge, onRestore }: {
+  customerId: string; archived: boolean; canMerge: boolean; canRestore: boolean;
+  onMerge: () => void; onRestore: () => void;
+}) {
+  const record = useCustomerRecord(customerId);
+  const duplicates = record.status === 'ready' ? record.data.duplicates : [];
+  if (!archived && !duplicates.length) return null;
+  return (
+    <div class="stack" style={{ gap: 6, marginTop: 10 }}>
+      {archived && (
+        <div class="alert alert-info">
+          This file is archived: it is off the customer list and the board, and its application answers are locked.
+          {canRestore && <> <button class="link-button" onClick={onRestore}>Restore it</button></>}
+        </div>
+      )}
+      {duplicates.length > 0 && (
+        <div class="alert alert-warn">
+          {duplicates.length === 1
+            ? `Another record looks like the same person: ${[duplicates[0]!.first_name, duplicates[0]!.last_name].filter(Boolean).join(' ') || 'unnamed'} (same ${duplicates[0]!.matched_on?.join(', ')}).`
+            : `${duplicates.length} other records look like the same person.`}
+          {canMerge && <> <button class="link-button" onClick={onMerge}>Review and merge</button></>}
+        </div>
       )}
     </div>
   );
@@ -252,26 +405,20 @@ function ApplicationTab({ data }: { data: Workspace }) {
                 Borrower records arrive with the application from apply.lendmax.ca.
               </Empty>
             : (
-              <div class="table-wrap">
-                <table class="data">
-                  <thead>
-                    <tr><th>Name</th><th>Role</th><th>Contact</th><th>Status</th><th>Address</th></tr>
-                  </thead>
-                  <tbody>
-                    {applicants.map((a) => (
-                      <tr key={a.id} style={{ cursor: 'default' }}>
-                        <td data-primary>{`${a.first_name ?? ''} ${a.last_name ?? ''}`.trim() || '—'}</td>
-                        <td data-label="Role">{String(a.applicant_role ?? '').replace(/_/g, ' ')}</td>
-                        <td data-label="Contact">{a.email ?? a.phone_e164 ?? '—'}</td>
-                        <td data-label="Status">{a.residential_status ?? '—'}</td>
-                        <td data-label="Address">
-                          {[a.addr_city, a.addr_province].filter(Boolean).join(', ') || '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <DataTable label="Borrowers" compact rows={applicants} rowKey={(a) => String(a.id)}
+                columns={[
+                  { key: 'name', header: 'Name', primary: true,
+                    value: (a) => `${a.first_name ?? ''} ${a.last_name ?? ''}`.trim() || null },
+                  { key: 'applicant_role', header: 'Role', filter: 'auto',
+                    value: (a) => String(a.applicant_role ?? '').replace(/_/g, ' ') },
+                  { key: 'contact', header: 'Contact', value: (a) => a.email ?? a.phone_e164 ?? null,
+                    render: (a) => a.email ?? a.phone_e164 ?? '—' },
+                  { key: 'residential_status', header: 'Status', filter: 'auto',
+                    render: (a) => a.residential_status ?? '—' },
+                  { key: 'address', header: 'Address',
+                    value: (a) => [a.addr_city, a.addr_province].filter(Boolean).join(', ') || null,
+                    render: (a) => [a.addr_city, a.addr_province].filter(Boolean).join(', ') || '—' },
+                ]} />
             )}
         </div>
       </div>
@@ -342,52 +489,11 @@ const MiniTable = ({ title, rows, empty }: {
  * the wrong place, and the link is short-lived, single-purpose and refuses
  * anything that is not what it claims to be.
  */
-function DocumentsTab({ data, id, session }: {
-  data: Workspace; id: string; session: Session;
+function DocumentsTab({ data, id, session, onChanged }: {
+  data: Workspace; id: string; session: Session; onChanged: () => void;
 }) {
-  const requests = useAsync<{ requests: Array<Record<string, any>> }>(
-    `/applications/${id}/document-requests`, [id]);
-  const [requesting, setRequesting] = useState(false);
-  const canRequest = session.permissions.includes('document.request');
-
   return (
     <div class="stack">
-      {canRequest && (
-        <div class="row" style={{ gap: 8 }}>
-          <button class="btn btn-primary" onClick={() => setRequesting(true)}>
-            Ask the client for documents
-          </button>
-        </div>
-      )}
-
-      {requests.status === 'ready' && requests.data.requests.length > 0 && (
-        <div class="card">
-          <div class="card-head"><h2>Asked for</h2></div>
-          <div class="card-body-flush">
-            {requests.data.requests.map((r) => (
-              <div key={r.id} class="list-row">
-                <div style={{ minWidth: 0 }}>
-                  <strong>
-                    {(r.items ?? []).map((i: { label: string }) => i.label).join(', ')
-                      || 'No items'}
-                  </strong>
-                  <div class="text-sm text-muted">
-                    Sent {relativeTime(r.created_at)}
-                    {r.requested_by_name ? ` by ${r.requested_by_name}` : ''}
-                    {' · '}
-                    {(r.items ?? []).filter((i: { received_at: string | null }) => i.received_at)
-                      .length} of {(r.items ?? []).length} received
-                    {r.expires_at ? ` · link expires ${formatDate(r.expires_at)}` : ''}
-                  </div>
-                </div>
-                <Badge tone={r.status === 'completed' ? 'ok'
-                  : r.status === 'cancelled' ? 'neutral' : 'warn'}>{r.status}</Badge>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       <div class="card">
         <div class="card-head">
           <h2>On file</h2>
@@ -399,127 +505,31 @@ function DocumentsTab({ data, id, session }: {
             sends through a request link.
           </Empty>
         ) : (
-          <div class="table-wrap">
-            <table class="data">
-              <thead><tr><th>Document</th><th>Category</th><th>Uploaded</th><th>Review</th><th>Scan</th></tr></thead>
-              <tbody>
-                {data.documents.map((d) => (
-                  <tr key={d.id} style={{ cursor: 'default' }}>
-                    <td data-primary>{d.display_label ?? d.filename}</td>
-                    <td data-label="Category">{d.category_key ?? '—'}</td>
-                    <td data-label="Uploaded">{relativeTime(d.uploaded_at)}</td>
-                    <td data-label="Review">
-                      <Badge tone={d.review_status === 'accepted' ? 'ok'
-                                 : d.review_status === 'rejected' ? 'danger' : 'warn'}>
-                        {d.review_status}
-                      </Badge>
-                    </td>
-                    <td data-label="Scan">
-                      <Badge tone={d.scan_status === 'clean' ? 'ok' : d.scan_status === 'infected' ? 'danger' : 'neutral'}>
-                        {d.scan_status}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable label="Documents on this file" compact rows={data.documents} rowKey={(d) => String(d.id)}
+            initialSort={{ key: 'uploaded_at', dir: 'desc' }}
+            columns={[
+              { key: 'name', header: 'Document', primary: true, value: (d) => d.display_label ?? d.filename },
+              { key: 'category_key', header: 'Category', filter: 'auto', render: (d) => d.category_key ?? '—' },
+              { key: 'uploaded_at', header: 'Uploaded', filter: 'auto', filterValue: (d) => recency(d.uploaded_at),
+                render: (d) => relativeTime(d.uploaded_at) },
+              { key: 'review_status', header: 'Review', filter: 'auto',
+                render: (d) => (
+                  <Badge tone={d.review_status === 'accepted' ? 'ok' : d.review_status === 'rejected' ? 'danger' : 'warn'}>
+                    {d.review_status}
+                  </Badge>
+                ) },
+              { key: 'scan_status', header: 'Scan', filter: 'auto',
+                render: (d) => (
+                  <Badge tone={d.scan_status === 'clean' ? 'ok' : d.scan_status === 'infected' ? 'danger' : 'neutral'}>
+                    {d.scan_status}
+                  </Badge>
+                ) },
+            ]} />
         )}
       </div>
 
-      {requesting && (
-        <RequestDocuments id={id} config={null} onClose={() => setRequesting(false)}
-                          onSent={() => { setRequesting(false); requests.reload(); }} />
-      )}
+      <DocumentRequestPanel applicationId={id} session={session} onSent={onChanged} />
     </div>
-  );
-}
-
-function RequestDocuments({ id, onClose, onSent }: {
-  id: string; config: unknown; onClose: () => void; onSent: () => void;
-}) {
-  const categories = useAsync<{ document_categories: Array<{ key: string; label: string }> }>(
-    '/config');
-  const [chosen, setChosen] = useState<string[]>([]);
-  const [channel, setChannel] = useState('email');
-  const [message, setMessage] = useState('');
-  const [expires, setExpires] = useState('21');
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const available = categories.status === 'ready'
-    ? categories.data.document_categories ?? [] : [];
-
-  const send = async () => {
-    setBusy(true); setError('');
-    try {
-      const result = await post<{ sent: boolean; reason?: string }>(
-        `/applications/${id}/document-requests`, {
-          items: chosen.map((key) => ({
-            category_key: key,
-            label: available.find((c) => c.key === key)?.label ?? key,
-          })),
-          channel, message: message || undefined,
-          expires_in_days: Number(expires),
-        });
-      toast(result.sent === false
-        ? `Request created, but not sent — ${result.reason ?? 'the send was refused'}`
-        : 'Sent. The client has a link.', result.sent === false ? 'info' : 'ok');
-      onSent();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not send that.');
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Modal title="Ask for documents" onClose={onClose} footer={
-      <>
-        <button class="btn" onClick={onClose}>Cancel</button>
-        <button class="btn btn-primary" disabled={busy || chosen.length === 0} onClick={send}>
-          {busy ? 'Sending…' : `Ask for ${chosen.length || 'nothing'}`}
-        </button>
-      </>
-    }>
-      {error && <div class="alert alert-error">{error}</div>}
-      <p class="text-sm text-muted">
-        The client gets a link, not a request to email attachments. It expires, it accepts
-        only the things asked for, and it checks that a file is what it says it is.
-      </p>
-
-      <Field label="What to ask for">
-        <div class="permission-pick permission-list">
-          {available.map((c) => (
-            <label key={c.key} class="check">
-              <input type="checkbox" checked={chosen.includes(c.key)}
-                     onChange={(e) => setChosen((e.target as HTMLInputElement).checked
-                       ? [...chosen, c.key]
-                       : chosen.filter((k) => k !== c.key))} />
-              <span class="text-sm">{c.label}</span>
-            </label>
-          ))}
-        </div>
-      </Field>
-
-      <div class="grid-2">
-        <Field label="How to send it">
-          <select value={channel} onChange={(e) => setChannel((e.target as HTMLSelectElement).value)}>
-            <option value="email">Email</option>
-            <option value="sms">Text</option>
-            <option value="both">Both</option>
-          </select>
-        </Field>
-        <Field label="Link lasts (days)">
-          <input type="number" min={1} max={90} value={expires}
-                 onInput={(e) => setExpires((e.target as HTMLInputElement).value)} />
-        </Field>
-      </div>
-
-      <Field label="Anything to add" hint="Appears above the list in the message.">
-        <textarea rows={3} value={message}
-                  onInput={(e) => setMessage((e.target as HTMLTextAreaElement).value)} />
-      </Field>
-    </Modal>
   );
 }
 
@@ -619,11 +629,15 @@ function LogTab({ id }: { id: string }) {
   );
 }
 
-function MoveStage({ id, current, config, onClose, onMoved }: {
-  id: string; current: string | null; config: Config | null;
+function MoveStage({ id, current, config, pipelineId, changePipeline = false, onClose, onMoved }: {
+  id: string; current: string | null; config: Config | null; pipelineId: string;
+  /** Pick another pipeline first, then the stage in it the file lands on. */
+  changePipeline?: boolean;
   onClose: () => void; onMoved: () => void;
 }) {
   const [stage, setStage] = useState('');
+  const others = (config?.pipelines ?? []).filter((p) => p.active && p.id !== pipelineId);
+  const [targetPipeline, setTargetPipeline] = useState(changePipeline ? others[0]?.id ?? '' : pipelineId);
   const [disposition, setDisposition] = useState('');
   const [note, setNote] = useState('');
   const [reason, setReason] = useState('');
@@ -646,7 +660,9 @@ function MoveStage({ id, current, config, onClose, onMoved }: {
         lost_disposition_key: isLost ? disposition : undefined,
         lost_reason_note: isLost ? note : undefined,
       });
-      toast(`Moved to ${target?.label}`, 'ok');
+      toast(changePipeline
+        ? `Moved to ${config?.pipelines.find((p) => p.id === targetPipeline)?.name} · ${target?.label}`
+        : `Moved to ${target?.label}`, 'ok');
       onMoved();
     } catch (err) {
       if (err instanceof ApiError && err.blockers?.length) {
@@ -659,7 +675,7 @@ function MoveStage({ id, current, config, onClose, onMoved }: {
   };
 
   return (
-    <Modal title="Move stage" onClose={onClose}
+    <Modal title={changePipeline ? 'Move to another pipeline' : 'Move stage'} onClose={onClose}
            footer={<>
              <button class="btn" onClick={onClose} disabled={busy}>Cancel</button>
              <button class="btn btn-primary" onClick={submit}
@@ -676,25 +692,25 @@ function MoveStage({ id, current, config, onClose, onMoved }: {
         </div>
       )}
 
-      <Field label="Move to">
-        <select value={stage} onChange={(e) => setStage((e.target as HTMLSelectElement).value)}>
-          <option value="">Choose a stage…</option>
-          {config?.stages.filter((s) => s.active && s.key !== current).map((s) => (
-            <option key={s.key} value={s.key}>{s.label}</option>
-          ))}
-        </select>
+      {changePipeline && (
+        <Field label="Pipeline" hint="The file keeps its history; the move is recorded on it.">
+          <SearchSelect value={targetPipeline} ariaLabel="Pipeline"
+                        options={others.map((p) => ({ value: p.id, label: p.name, hint: p.is_default ? 'Default' : undefined }))}
+                        onChange={(v) => { setTargetPipeline(v); setStage(''); }} />
+        </Field>
+      )}
+      <Field label={changePipeline ? 'Stage it lands on' : 'Move to'}>
+        <SearchSelect value={stage} onChange={setStage} ariaLabel="Move to" placeholder="Choose a stage…"
+                      options={stageOptions(config, { pipelineId: targetPipeline, exclude: current })} />
       </Field>
 
       {isLost && (
         <>
           <Field label="Why was it lost?"
                  hint="The disposition decides whether and when this client is worth approaching again.">
-            <select value={disposition} onChange={(e) => setDisposition((e.target as HTMLSelectElement).value)}>
-              <option value="">Choose a reason…</option>
-              {config?.lost_dispositions.map((d) => (
-                <option key={d.key} value={d.key}>{d.label}</option>
-              ))}
-            </select>
+            <SearchSelect value={disposition} onChange={setDisposition} ariaLabel="Why was it lost?"
+                          placeholder="Choose a reason…"
+                          options={(config?.lost_dispositions ?? []).map((d) => ({ value: d.key, label: d.label }))} />
           </Field>
           {dispositionMeta?.requires_note && (
             <Field label="Details" hint="Required for this disposition.">
@@ -717,3 +733,63 @@ function MoveStage({ id, current, config, onClose, onMoved }: {
  * Deliberately not a mocked-up panel: a fake Kanban with no persistence behind
  * it is how a product gets signed off and then does not work.
  */
+
+/**
+ * Hand this lead to somebody. Only active staff are offered — an inactive or
+ * not-yet-activated account could not open the file it was given. Staff with
+ * round robin off are offered: that switch only stops automatic assignment.
+ */
+function AssignLead({ id, current, clientName, onClose, onAssigned }: {
+  id: string; current: { user_id: string; name: string } | null; clientName: string;
+  onClose: () => void; onAssigned: () => void;
+}) {
+  const staff = useAsync<{ staff: Array<{ id: string; name: string; role_name: string; open_leads: number;
+                                          round_robin_enabled: boolean }> }>('/staff/assignable');
+  const [to, setTo] = useState(current?.user_id ?? '');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const options: SelectOption[] = staff.status === 'ready'
+    ? staff.data.staff.map((s) => ({
+      value: s.id, label: s.name,
+      hint: `${s.role_name} · ${s.open_leads} open lead${s.open_leads === 1 ? '' : 's'}${s.round_robin_enabled ? '' : ' · round robin off'}`,
+    }))
+    : [];
+
+  const submit = async () => {
+    if (!to) { setError('Choose a staff member.'); return; }
+    setBusy(true);
+    try {
+      const result = await post<{ assigned_to: { name: string } }>(`/applications/${id}/assign`, { user_id: to, role: 'broker' });
+      toast(`${clientName} is now assigned to ${result.assigned_to.name}.`, 'ok');
+      onAssigned();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not assign the lead.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={current ? 'Reassign lead' : 'Assign lead'} onClose={onClose} footer={
+      <>
+        <button class="btn" onClick={onClose} disabled={busy}>Cancel</button>
+        <button class="btn btn-primary" onClick={submit}
+                disabled={busy || !to || to === current?.user_id}>
+          {busy ? 'Assigning…' : 'Assign'}
+        </button>
+      </>
+    }>
+      <p class="mt-0">
+        {current ? <>Currently with <strong>{current.name}</strong>. </> : null}
+        They are notified, and the change is recorded on the file’s log.
+      </p>
+      {staff.status === 'error' && <ErrorNote error={staff.error} code={staff.code} onRetry={staff.reload} />}
+      <Field label="Assign to" error={error}>
+        <SearchSelect value={to} options={options} onChange={(v) => { setTo(v); setError(''); }}
+                      placeholder={staff.status === 'loading' ? 'Loading staff…' : 'Choose a staff member…'}
+                      searchPlaceholder="Search staff by name or role…" ariaLabel="Assign to"
+                      emptyText="No active staff match that." invalid={!!error} />
+      </Field>
+    </Modal>
+  );
+}

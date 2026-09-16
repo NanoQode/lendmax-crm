@@ -41,6 +41,7 @@ export const MERGE_FIELDS: FieldSpec[] = [
   { name: 'user_name', label: 'Your name', example: 'Michael Chen' },
   { name: 'user_first_name', label: 'Your first name', example: 'Michael' },
   { name: 'user_cell', label: 'Your mobile', example: '(416) 555-0142' },
+  { name: 'signature', label: 'Your email signature', example: 'Michael Chen\nMortgage Agent\n(416) 555-0142' },
   { name: 'schedule_link', label: 'Your booking link', format: 'url',
     example: 'https://calendar.app.google/…' },
   { name: 'amount_requested', label: 'Mortgage requested', format: 'money', example: '$785,000' },
@@ -65,6 +66,15 @@ export const MERGE_FIELDS: FieldSpec[] = [
   { name: 'calculator_name', label: 'Name of that calculator',
     example: 'Refinance vs Renew Calculator' },
   { name: 'organization_name', label: 'Brokerage name', example: 'Lendmax' },
+  // Appointment emails only; anywhere else these have no value and their line is dropped.
+  { name: 'appointment_date', label: 'Appointment date', example: 'Thursday, September 18, 2026' },
+  { name: 'appointment_time', label: 'Appointment time', example: '2:30 p.m. EDT' },
+  { name: 'appointment_type', label: 'Appointment type', example: 'Discovery call' },
+  { name: 'appointment_duration', label: 'Appointment length', example: '30 minutes' },
+  { name: 'appointment_where', label: 'Where / how to join',
+    example: 'Join the video call: https://meet.google.com/abc-defg-hij' },
+  { name: 'appointment_link', label: 'Video call link', format: 'url', example: 'https://meet.google.com/abc-defg-hij' },
+  { name: 'appointment_host', label: 'Who the meeting is with', example: 'Priya Sandhu' },
 ];
 
 export const MERGE_FIELD_NAMES = new Set(MERGE_FIELDS.map((f) => f.name));

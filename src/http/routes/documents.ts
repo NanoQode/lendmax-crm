@@ -19,8 +19,16 @@ import {
 } from '../../services/storage.ts';
 import { send } from '../../services/messaging.ts';
 import { resolveIntegration } from '../../services/integrations.ts';
+import { can } from '../../domain/permissions.ts';
+import { describeFormats } from '../../domain/required-documents.ts';
 import { AppError, asyncRoute, notFound } from '../middleware/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
+import {
+  createDocumentRequest, markItemReceived, refreshOutstanding,
+} from '../../services/document-requests.ts';
+
+// Re-exported for the client upload link (public.ts).
+export { markItemReceived, refreshOutstanding };
 
 export const documentRoutes: Router = Router();
 documentRoutes.use(requireAuth);
@@ -307,12 +315,15 @@ documentRoutes.patch(
                          422, 'validation_failed');
     }
 
-    const doc = await queryOne<{ application_id: string; document_request_item_id: string | null }>(
+    const doc = await queryOne<{
+      application_id: string; document_request_item_id: string | null;
+      customer_id: string | null; display_label: string | null;
+    }>(
       `UPDATE documents SET review_status = $2, review_note = $3,
                             display_label = COALESCE($4, display_label),
                             reviewed_by = $5, reviewed_at = now()
         WHERE id = $1 AND organization_id = $6
-        RETURNING application_id, document_request_item_id`,
+        RETURNING application_id, document_request_item_id, customer_id, display_label`,
       [id, body.review_status, body.review_note ?? null, body.display_label ?? null,
        user.id, user.organization_id],
     );
@@ -328,6 +339,54 @@ documentRoutes.patch(
     }
     if (doc.application_id) await refreshOutstanding(doc.application_id);
 
+    /**
+     * A rejection the client never hears about is a document that never gets
+     * re-sent.
+     *
+     * Only on a rejection: being told a document was accepted is pleasant and
+     * an email each for nine of them is not. Transactional, because it is about
+     * the mortgage they asked us to arrange — a marketing unsubscribe must not
+     * stop it. The live upload link is included where one is still open, so the
+     * client has somewhere to send the replacement without asking for a new
+     * link first.
+     */
+    let told: 'sent' | 'no_open_link' | 'refused' | null = null;
+    if (body.review_status === 'rejected' && doc.customer_id) {
+      const open = await queryOne<{ id: string }>(
+        `SELECT id FROM document_requests
+          WHERE application_id = $1 AND status <> 'complete' AND expires_at > now()
+          ORDER BY created_at DESC LIMIT 1`,
+        [doc.application_id],
+      );
+      const label = doc.display_label ?? 'the document you sent';
+      const outcome = await send({
+        organizationId: user.organization_id,
+        customerId: doc.customer_id,
+        applicationId: doc.application_id,
+        channel: 'email',
+        purpose: 'transactional',
+        subject: `We need another copy of ${label}`,
+        bodyText:
+          `Hello,\n\nWe could not use ${label} for your mortgage application.\n\n` +
+          `${body.review_note!.trim()}\n\n` +
+          (open
+            ? 'You can send the replacement through the same secure link we emailed you earlier. ' +
+              'If you no longer have it, reply to this email and we will send a new one.\n\n'
+            : 'Reply to this email and we will send you a fresh upload link.\n\n') +
+          `${user.name}\nLendmax\n`,
+        origin: 'manual',
+        sentBy: user.id,
+        urgent: true,
+        // One email per rejection, not one per time somebody re-saves the note.
+        dedupeKey: `docreject:${id}:${body.review_note!.trim().slice(0, 40)}`,
+      });
+      // `queued` and `scheduled` are on their way; only a suppression or a
+      // failure means the client has not been told.
+      const away = outcome.status === 'sent' || outcome.status === 'queued'
+        || outcome.status === 'scheduled';
+      told = away ? (open ? 'sent' : 'no_open_link') : 'refused';
+    }
+
     recordAuditSafely({
       organizationId: user.organization_id,
       actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip },
@@ -336,7 +395,7 @@ documentRoutes.patch(
       entityId: id,
       summary: `Document ${body.review_status}${body.review_note ? `: ${body.review_note}` : ''}`,
     });
-    res.json({ ok: true });
+    res.json({ ok: true, client_told: told });
   }),
 );
 
@@ -356,7 +415,8 @@ documentRoutes.get(
          LEFT JOIN users u ON u.id = r.requested_by
          LEFT JOIN LATERAL (
            SELECT json_agg(json_build_object('id', i.id, 'label', i.label, 'status', i.status,
-                                             'required', i.required, 'category_key', i.category_key)
+                                             'required', i.required, 'category_key', i.category_key,
+                                             'received_at', i.received_at, 'formats', i.formats)
                            ORDER BY i.position) AS list
              FROM document_request_items i WHERE i.document_request_id = r.id
          ) items ON TRUE
@@ -367,123 +427,29 @@ documentRoutes.get(
   }),
 );
 
-const RequestInput = z.object({
-  items: z.array(z.object({
-    category_key: z.string().optional(),
-    label: z.string().min(1),
-    description: z.string().optional(),
-    required: z.boolean().default(true),
-    applicant_id: z.string().uuid().optional(),
-  })).min(1, 'Choose at least one document.'),
-  channel: z.enum(['email', 'sms', 'both']).default('email'),
-  message: z.string().optional(),
-  expires_in_days: z.coerce.number().int().min(1).max(90).default(21),
-});
-
 documentRoutes.post(
   '/applications/:id/document-requests',
   requirePermission('document.request'),
   asyncRoute(async (req, res) => {
     const applicationId = z.string().uuid().parse(req.params.id);
-    const input = RequestInput.parse(req.body);
     const user = req.user!;
 
-    const app = await queryOne<{
-      customer_id: string; first_name: string | null; email: string | null;
-      phone_e164: string | null;
-    }>(
-      `SELECT a.customer_id, c.first_name, c.email, c.phone_e164
-         FROM applications a JOIN customers c ON c.id = a.customer_id
-        WHERE a.id = $1 AND a.organization_id = $2`,
-      [applicationId, user.organization_id],
-    );
-    if (!app) throw notFound('That application');
-
-    // The token is a bearer credential to somebody's financial documents, so
-    // it is generated with real entropy and only its hash is stored.
-    const token = randomBytes(32).toString('base64url');
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    const expiresAt = new Date(Date.now() + input.expires_in_days * 86_400_000);
-
-    const requestId = await withTransaction(async (client) => {
-      const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO document_requests
-           (organization_id, application_id, customer_id, message, channel, token_hash,
-            expires_at, requested_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-        [user.organization_id, applicationId, app.customer_id, input.message ?? null,
-         input.channel, tokenHash, expiresAt, user.id],
+    if (!can(user as never, 'customer.view_all')) {
+      const assigned = await queryOne(
+        `SELECT 1 FROM assignments
+          WHERE application_id = $1 AND user_id = $2 AND unassigned_at IS NULL`,
+        [applicationId, user.id],
       );
-      const id = rows[0]!.id;
-      for (const [i, item] of input.items.entries()) {
-        await client.query(
-          `INSERT INTO document_request_items
-             (document_request_id, category_key, label, description, applicant_id, required, position)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [id, item.category_key ?? null, item.label, item.description ?? null,
-           item.applicant_id ?? null, item.required, i],
-        );
-      }
-      await client.query(
-        `INSERT INTO activity (organization_id, application_id, customer_id, kind, actor_user_id,
-                               actor_name, summary, entity_type, entity_id)
-         VALUES ($1,$2,$3,'document',$4,$5,$6,'document_request',$7)`,
-        [user.organization_id, applicationId, app.customer_id, user.id, user.name,
-         `${user.name} requested ${input.items.length} document(s)`, id],
-      );
-      return id;
-    });
-
-    const link = `${env.PUBLIC_URL.replace(/\/+$/, '')}/upload/${token}`;
-    const list = input.items.map((i) => `• ${i.label}`).join('\n');
-    const greeting = app.first_name ? `Hi ${app.first_name},` : 'Hello,';
-
-    const bodyText =
-      `${greeting}\n\n` +
-      `${input.message?.trim() || 'To keep your mortgage application moving, we need a few documents.'}\n\n` +
-      `${list}\n\n` +
-      `You can upload them here — the link is private to you and works from your phone:\n${link}\n\n` +
-      `${user.name}\nLendmax\n`;
-
-    // Transactional: these are documents for the mortgage the client asked us
-    // to arrange, not marketing, and a marketing unsubscribe must not stop
-    // them arriving. Urgent, because a client is usually waiting on the link.
-    const sends: Array<{ channel: 'email' | 'sms'; outcome: Awaited<ReturnType<typeof send>> }> = [];
-    if (input.channel === 'email' || input.channel === 'both') {
-      sends.push({ channel: 'email', outcome: await send({
-        organizationId: user.organization_id, customerId: app.customer_id,
-        applicationId, channel: 'email', purpose: 'transactional',
-        subject: 'Documents for your mortgage application',
-        bodyText, origin: 'manual', sentBy: user.id, urgent: true,
-        dedupeKey: `docreq:${requestId}:email`,
-      }) });
-    }
-    if (input.channel === 'sms' || input.channel === 'both') {
-      sends.push({ channel: 'sms', outcome: await send({
-        organizationId: user.organization_id, customerId: app.customer_id,
-        applicationId, channel: 'sms', purpose: 'transactional',
-        bodyText:
-          `${greeting} we need ${input.items.length} document(s) for your mortgage application. ` +
-          `Upload them here: ${link} — ${user.name}, Lendmax`,
-        origin: 'manual', sentBy: user.id, urgent: true,
-        dedupeKey: `docreq:${requestId}:sms`,
-      }) });
+      if (!assigned) throw notFound('That application');
     }
 
-    await refreshOutstanding(applicationId);
-
-    res.status(201).json({
-      ok: true,
-      id: requestId,
-      // The link is returned once so a broker on the phone can read it out.
-      // It is not stored anywhere in plaintext.
-      link,
-      // Whether each channel actually went, and why not where it did not.
-      delivery: sends.map((s) => ({
-        channel: s.channel, ok: s.outcome.ok, status: s.outcome.status,
-        reason: s.outcome.decision.reason,
-      })),
-    });
+    const result = await createDocumentRequest({
+      organizationId: user.organization_id, userId: user.id, name: user.name, role: user.role,
+      kind: 'user', ip: req.ip,
+    }, applicationId, req.body);
+    // The link is returned once so a broker on the phone can read it out.
+    // It is not stored anywhere in plaintext.
+    res.status(201).json({ ok: true, ...result });
   }),
 );
 
@@ -505,50 +471,3 @@ documentRoutes.post(
   }),
 );
 
-// ── Shared helpers ─────────────────────────────────────────────────────────
-
-export async function markItemReceived(
-  client: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
-  itemId: string,
-): Promise<void> {
-  await client.query(
-    `UPDATE document_request_items SET status = 'received', received_at = now()
-      WHERE id = $1 AND status = 'outstanding'`,
-    [itemId],
-  );
-  // A request is complete when nothing required is outstanding. Optional items
-  // do not hold it open, or a request for "anything else you think helps"
-  // never closes.
-  await client.query(
-    `UPDATE document_requests r
-        SET status = CASE
-              WHEN NOT EXISTS (SELECT 1 FROM document_request_items i
-                                WHERE i.document_request_id = r.id AND i.required
-                                  AND i.status = 'outstanding') THEN 'completed'
-              WHEN EXISTS (SELECT 1 FROM document_request_items i
-                            WHERE i.document_request_id = r.id AND i.status <> 'outstanding')
-                THEN 'partial'
-              ELSE r.status END,
-            completed_at = CASE
-              WHEN NOT EXISTS (SELECT 1 FROM document_request_items i
-                                WHERE i.document_request_id = r.id AND i.required
-                                  AND i.status = 'outstanding') THEN now()
-              ELSE r.completed_at END
-      WHERE r.id = (SELECT document_request_id FROM document_request_items WHERE id = $1)`,
-    [itemId],
-  );
-}
-
-/** The denormalised count the list, the board and three alert rules read. */
-export async function refreshOutstanding(applicationId: string): Promise<void> {
-  await query(
-    `UPDATE applications a
-        SET documents_outstanding = COALESCE((
-              SELECT COUNT(*) FROM document_request_items i
-                JOIN document_requests r ON r.id = i.document_request_id
-               WHERE r.application_id = a.id AND r.status IN ('open','partial')
-                 AND i.required AND i.status = 'outstanding'), 0)
-      WHERE a.id = $1`,
-    [applicationId],
-  );
-}

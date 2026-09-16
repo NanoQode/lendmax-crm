@@ -20,6 +20,7 @@ import { renderCampaign, renderSms, BlockSchema, type Block } from '../../domain
 import { renderTemplate } from '../../domain/merge-fields.ts';
 import { footerFor } from '../../http/routes/campaigns.ts';
 import { unsubscribeUrl } from '../../services/unsubscribe.ts';
+import { signatureFor } from '../../services/signature.ts';
 
 /** How many go out per batch minute. Derived from the campaign's throttle. */
 const BATCH_SECONDS = 60;
@@ -64,6 +65,8 @@ export function registerCampaignHandlers(): void {
       `SELECT u.name, u.email, p.mobile_phone, p.booking_url
          FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id
         WHERE u.id = $1`, [campaign.sender_id]);
+    // The signature block signs as the sender, in the signature they wrote.
+    const signature = await signatureFor(campaign.sender_id);
 
     const { rows: batch } = await query<{
       id: string; customer_id: string; address: string;
@@ -110,6 +113,8 @@ export function registerCampaignHandlers(): void {
         user_first_name: sender?.name?.split(' ')[0],
         user_cell: sender?.mobile_phone,
         schedule_link: sender?.booking_url,
+        signature: signature?.text ?? null,
+        user_signature_html: signature?.html ?? null,
         organization_name: recipient.organization_name,
       };
 

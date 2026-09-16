@@ -47,7 +47,7 @@ export type Segment = {
 type FieldSpec = {
   label: string;
   sql: string;
-  type: 'text' | 'number' | 'date' | 'boolean' | 'enum' | 'stage';
+  type: 'text' | 'number' | 'date' | 'boolean' | 'enum' | 'stage' | 'pipeline';
   options?: string[];
   help?: string;
 };
@@ -57,6 +57,7 @@ export const SEGMENT_FIELDS: Record<string, FieldSpec> = {
     label: 'Property province', sql: 'app.property_province', type: 'text',
   },
   city: { label: 'Property city', sql: 'app.property_city', type: 'text' },
+  pipeline: { label: 'Pipeline', sql: 'pl.key', type: 'pipeline' },
   stage_key: { label: 'Pipeline stage', sql: 'app.stage_key', type: 'stage' },
   stage_category: {
     label: 'Stage category', sql: "COALESCE(ps.category,'open')", type: 'enum',

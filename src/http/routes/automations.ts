@@ -16,21 +16,30 @@
  * first time it embarrasses them in front of a client.
  */
 import { Router } from 'express';
+import { pipelineOptions } from '../../services/pipelines.ts';
 import { z } from 'zod';
 import { query, queryOne, withTransaction } from '../../db/pool.ts';
 import { recordAudit } from '../../services/audit.ts';
 import { asyncRoute, AppError, notFound } from '../middleware/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 import {
-  DefinitionSchema, TRIGGERS, validateDefinition, nodeByKey,
+  DefinitionSchema, validateDefinition, nodeByKey,
   type AutomationDefinition,
 } from '../../domain/automation.ts';
+import { ACTION_CATALOGUE, OPERATORS, TRIGGER_CATALOGUE } from '../../domain/automation-catalogue.ts';
+import { factFields } from '../../services/automation-facts.ts';
 import { MERGE_FIELDS, previewTemplate, validateTemplate } from '../../domain/merge-fields.ts';
-import { enrol, runStep } from '../../services/automation-engine.ts';
+import { dryRun, enrol, runStep } from '../../services/automation-engine.ts';
 import { enqueue } from '../../jobs/queue.ts';
 
 export const automationRoutes: Router = Router();
 automationRoutes.use(requireAuth);
+
+// Every `:id` here is a uuid. Anything else cannot match a row, and is a
+// "not found" rather than the database refusing to compare it.
+automationRoutes.param('id', (_req, _res, next, id: string) => {
+  next(z.string().uuid().safeParse(id).success ? undefined : notFound('That record'));
+});
 
 // ── The catalogue the builder needs to draw itself ─────────────────────────
 
@@ -45,104 +54,48 @@ automationRoutes.get(
   requirePermission('automation.view'),
   asyncRoute(async (req, res) => {
     const user = req.user!;
-    const stages = await query<{ key: string; label: string; category: string }>(
-      `SELECT key, label, category FROM pipeline_stages
-        WHERE organization_id = $1 AND active ORDER BY position`,
-      [user.organization_id],
-    );
+    // Stages carry their pipeline's name, so a stage called "New" in two
+    // pipelines is not two identical entries in a dropdown.
+    const { pipelines, stages } = await pipelineOptions(user.organization_id);
+    const [users, automations, templates, tags, requiredDocuments] = await Promise.all([
+      query<{ id: string; name: string; role: string }>(
+        `SELECT id, name, role FROM users WHERE organization_id = $1 AND active AND archived_at IS NULL ORDER BY name`,
+        [user.organization_id]),
+      query<{ id: string; name: string; status: string }>(
+        `SELECT id, name, status FROM automations WHERE organization_id = $1 AND status <> 'archived' ORDER BY name`,
+        [user.organization_id]),
+      query<{ key: string; name: string; channel: string }>(
+        `SELECT key, name, channel FROM templates WHERE organization_id = $1 AND active ORDER BY name`,
+        [user.organization_id]),
+      query<{ tag: string }>(
+        `SELECT DISTINCT unnest(tags) AS tag FROM customers WHERE organization_id = $1 ORDER BY 1 LIMIT 500`,
+        [user.organization_id]),
+      query<{ id: string; name: string; purpose: string; required: boolean }>(
+        `SELECT id, name, purpose, required FROM required_documents
+          WHERE organization_id = $1 AND active AND archived_at IS NULL ORDER BY purpose, position`,
+        [user.organization_id]),
+    ]);
     res.json({
-      triggers: TRIGGERS.map((type) => ({ type, label: TRIGGER_LABELS[type] ?? type })),
-      node_types: NODE_TYPES,
+      triggers: TRIGGER_CATALOGUE,
+      actions: ACTION_CATALOGUE,
+      // Kept for the client file's automation tab, which reads these names.
+      node_types: ACTION_CATALOGUE.map((a) => ({ type: a.type, label: a.label, icon: a.icon })),
       operators: OPERATORS,
-      fields: CONDITION_FIELDS,
+      fields: factFields(),
       merge_fields: MERGE_FIELDS,
-      stages: stages.rows,
+      stages,
+      pipelines,
+      users: users.rows,
+      automations: automations.rows,
+      templates: templates.rows,
+      tags: tags.rows.map((r) => r.tag),
+      required_documents: requiredDocuments.rows,
     });
   }),
 );
 
-const TRIGGER_LABELS: Record<string, string> = {
-  'customer.created': 'A new client is added',
-  'application.created': 'An application is started',
-  'application.section_saved': 'A section of the application is saved',
-  'application.submitted': 'An application is submitted',
-  'application.completed': 'An application is completed',
-  'application.abandoned': 'An application is abandoned',
-  'stage.changed': 'The pipeline stage changes',
-  'appointment.booked': 'An appointment is booked',
-  'appointment.no_show': 'A client does not show',
-  'appointment.completed': 'An appointment happens',
-  'document.requested': 'A document is requested',
-  'document.uploaded': 'A document is uploaded',
-  'documents.outstanding': 'Documents stay outstanding',
-  'closing.approaching': 'A closing date approaches',
-  'lender.submitted': 'A file is sent to a lender',
-  'lender.status_changed': 'A lender status changes',
-  'file.funded': 'A file funds',
-  'file.lost': 'A file is lost',
-  'maturity.approaching': 'A mortgage approaches maturity',
-  'task.overdue': 'A task goes overdue',
-  'no_activity': 'Nothing happens for a while',
-  'message.received': 'A client replies',
-  'consent.changed': 'Consent changes',
-  manual: 'Somebody enrols the client by hand',
-};
-
-const NODE_TYPES = [
-  { type: 'send_email', label: 'Send an email', icon: 'mail' },
-  { type: 'send_sms', label: 'Send a text', icon: 'message' },
-  { type: 'wait', label: 'Wait', icon: 'clock' },
-  { type: 'branch', label: 'Branch on a condition', icon: 'split' },
-  { type: 'create_task', label: 'Create a task', icon: 'check' },
-  { type: 'notify_user', label: 'Notify somebody', icon: 'bell' },
-  { type: 'add_note', label: 'Add a note', icon: 'note' },
-  { type: 'add_tag', label: 'Tag the client', icon: 'tag' },
-  { type: 'set_stage', label: 'Move the pipeline stage', icon: 'arrow' },
-  { type: 'stop', label: 'End the sequence', icon: 'stop' },
-];
-
-const OPERATORS = [
-  { op: 'eq', label: 'is' },
-  { op: 'ne', label: 'is not' },
-  { op: 'in', label: 'is one of' },
-  { op: 'not_in', label: 'is none of' },
-  { op: 'gt', label: 'is more than' },
-  { op: 'gte', label: 'is at least' },
-  { op: 'lt', label: 'is less than' },
-  { op: 'lte', label: 'is at most' },
-  { op: 'is_set', label: 'has a value' },
-  { op: 'is_empty', label: 'is empty' },
-  { op: 'contains', label: 'contains' },
-];
-
-/**
- * The facts a condition may test, with the type so the builder can offer the
- * right control. This is the same list `gatherFacts` produces — a field not
- * on it evaluates against undefined, which is why the builder offers a
- * closed list rather than a text box.
- */
-const CONDITION_FIELDS = [
-  { field: 'stage_key', label: 'Pipeline stage', type: 'stage' },
-  { field: 'stage_category', label: 'Stage category', type: 'enum',
-    options: ['open', 'won', 'lost'] },
-  { field: 'status_key', label: 'Status', type: 'text' },
-  { field: 'percent_complete', label: 'Application completeness (%)', type: 'number' },
-  { field: 'documents_outstanding', label: 'Documents outstanding', type: 'number' },
-  { field: 'conditions_outstanding', label: 'Lender conditions outstanding', type: 'number' },
-  { field: 'days_to_close', label: 'Days to closing', type: 'number' },
-  { field: 'days_to_maturity', label: 'Days to maturity', type: 'number' },
-  { field: 'amount_requested', label: 'Amount requested', type: 'number' },
-  { field: 'transaction_type_key', label: 'Transaction type', type: 'text' },
-  { field: 'property_province', label: 'Property province', type: 'text' },
-  { field: 'property_city', label: 'Property city', type: 'text' },
-  { field: 'future_appointments', label: 'Upcoming appointments', type: 'number' },
-  { field: 'last_appointment_no_show', label: 'Last appointment was a no-show', type: 'boolean' },
-  { field: 'funding_confirmed', label: 'Funding confirmed', type: 'boolean' },
-  { field: 'scarlett_deal_id', label: 'Sent to Scarlett', type: 'text' },
-  { field: 'lost_disposition_key', label: 'Lost reason', type: 'text' },
-  { field: 'email', label: 'Email address', type: 'text' },
-  { field: 'phone_e164', label: 'Mobile number', type: 'text' },
-];
+const TRIGGER_LABELS: Record<string, string> =
+  Object.fromEntries(TRIGGER_CATALOGUE.map((t) => [t.type, t.label]));
 
 // ── The list ───────────────────────────────────────────────────────────────
 
@@ -160,6 +113,15 @@ automationRoutes.get(
               (SELECT v.definition->'trigger'->>'type' FROM automation_versions v
                 WHERE v.automation_id = a.id
                 ORDER BY v.version DESC LIMIT 1) AS trigger_type,
+              (SELECT COALESCE(
+                        (SELECT array_agg(t->>'type') FROM jsonb_array_elements(v.definition->'triggers') t),
+                        ARRAY[v.definition->'trigger'->>'type'])
+                 FROM automation_versions v WHERE v.automation_id = a.id
+                ORDER BY v.version DESC LIMIT 1) AS trigger_types,
+              (SELECT count(*)::int FROM automation_enrollments en WHERE en.automation_id = a.id)
+                AS total_enrollments,
+              (SELECT max(en.enrolled_at) FROM automation_enrollments en WHERE en.automation_id = a.id)
+                AS last_enrolled_at,
               COALESCE(e.active, 0) AS active_enrollments,
               COALESCE(e.completed, 0) AS completed_enrollments,
               COALESCE(e.stopped, 0) AS stopped_enrollments,
@@ -236,7 +198,9 @@ automationRoutes.get(
       automation,
       versions: versions.rows,
       draft_version: draft?.version ?? null,
-      definition: draft?.definition ?? null,
+      // Normalised (a single old `trigger` comes back as `triggers` too), so
+      // the builder only ever reads one shape.
+      definition: parsed?.success ? parsed.data : draft?.definition ?? null,
       issues: parsed?.success ? validateDefinition(parsed.data) : parsed
         ? [{ level: 'error', message: 'This draft is not a valid definition.' }] : [],
     });
@@ -260,7 +224,10 @@ automationRoutes.post(
   asyncRoute(async (req, res) => {
     const user = req.user!;
     const body = CreateInput.parse(req.body);
-    const key = body.key ?? slug(body.name);
+    // Two workflows may share a name (two "New workflow"s, or a recipe used
+    // twice), so a derived key is made unique. A key the caller chose is kept
+    // as given, and a clash with it is a real conflict.
+    const key = body.key ?? await freeKey(user.organization_id, slug(body.name));
 
     const definition: AutomationDefinition = body.definition
       ? DefinitionSchema.parse(body.definition)
@@ -682,6 +649,16 @@ function describeNode(node: { type: string } & Record<string, unknown>): string 
     case 'add_note': return 'Add a note';
     case 'add_tag': return `Tag "${String(node.tag ?? '')}"`;
     case 'set_stage': return `Move to ${String(node.stage_key ?? '')}`;
+    case 'if_else': return 'If / Else';
+    case 'goto': return 'Go to';
+    case 'remove_tag': return `Remove tag "${String(node.tag ?? '')}"`;
+    case 'update_contact': return `Update ${String(node.field ?? '').replace(/_/g, ' ')}`;
+    case 'assign_user': return node.mode === 'round_robin' ? 'Assign by round robin' : 'Assign to a user';
+    case 'request_documents': return 'Request documents';
+    case 'internal_email': return `Internal email: ${String(node.subject ?? '')}`;
+    case 'enroll_automation': return 'Add to another workflow';
+    case 'stop_automation': return 'Remove from other workflows';
+    case 'webhook': return 'Webhook';
     case 'stop': return 'End';
     default: return node.type;
   }
@@ -771,7 +748,7 @@ automationRoutes.post(
         if (!node) throw new AppError('There is no step left to skip.', 400);
         // A branch has two possible nexts and skipping one would be choosing
         // for the engine, which is not what "skip" means.
-        if (node.type === 'branch') {
+        if (node.type === 'branch' || node.type === 'if_else') {
           throw new AppError('A branch cannot be skipped — pause or end the sequence instead.', 400);
         }
         const next = node.type === 'stop' ? null : node.next ?? null;
@@ -908,6 +885,128 @@ automationRoutes.post(
     res.status(201).json({ id: enrollmentId });
   }),
 );
+
+// ── Duplicating ───────────────────────────────────────────────────────────
+
+/** A copy of the latest version, as a new draft nobody is enrolled in. */
+automationRoutes.post(
+  '/automations/:id/duplicate',
+  requirePermission('automation.edit'),
+  asyncRoute(async (req, res) => {
+    const user = req.user!;
+    const source = await queryOne<{ id: string; name: string; description: string | null; purpose: string;
+                                    allow_reenrollment: boolean; reenrollment_cooldown_days: number | null;
+                                    definition: unknown }>(
+      `SELECT a.id, a.name, a.description, a.purpose, a.allow_reenrollment, a.reenrollment_cooldown_days,
+              (SELECT v.definition FROM automation_versions v WHERE v.automation_id = a.id
+                ORDER BY v.version DESC LIMIT 1) AS definition
+         FROM automations a WHERE a.id = $1 AND a.organization_id = $2`,
+      [req.params.id, user.organization_id]);
+    if (!source) throw notFound('That automation');
+    const name = `${source.name} (copy)`;
+    const id = await withTransaction(async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO automations (organization_id, key, name, description, purpose, status, created_by,
+                                  allow_reenrollment, reenrollment_cooldown_days)
+         VALUES ($1,$2,$3,$4,$5,'draft',$6,$7,$8) RETURNING id`,
+        [user.organization_id, `${slug(name)}_${Date.now().toString(36)}`, name, source.description,
+         source.purpose, user.id, source.allow_reenrollment, source.reenrollment_cooldown_days]);
+      await client.query(
+        `INSERT INTO automation_versions (automation_id, version, definition) VALUES ($1,1,$2::jsonb)`,
+        [rows[0]!.id, JSON.stringify(source.definition)]);
+      return rows[0]!.id;
+    });
+    await recordAudit({
+      organizationId: user.organization_id,
+      actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip },
+      action: 'automation.create', entityType: 'automation', entityId: id,
+      summary: `Automation "${name}" created as a copy of "${source.name}"`,
+    });
+    res.status(201).json({ id });
+  }),
+);
+
+// ── Testing ────────────────────────────────────────────────────────────────
+
+/**
+ * Walk the workflow against one real client without doing anything: which
+ * triggers' filters pass, whether they would be let in, and the path the
+ * steps would take today. The draft on screen is tested if it is sent, so a
+ * change can be checked before it is saved.
+ */
+automationRoutes.post(
+  '/automations/:id/test',
+  requirePermission('automation.view'),
+  asyncRoute(async (req, res) => {
+    const user = req.user!;
+    const body = z.object({
+      customer_id: z.string().uuid(),
+      application_id: z.string().uuid().optional(),
+      definition: z.unknown().optional(),
+    }).parse(req.body);
+    const exists = await queryOne('SELECT 1 FROM automations WHERE id = $1 AND organization_id = $2',
+      [req.params.id, user.organization_id]);
+    if (!exists) throw notFound('That automation');
+    const customer = await queryOne('SELECT 1 FROM customers WHERE id = $1 AND organization_id = $2',
+      [body.customer_id, user.organization_id]);
+    if (!customer) throw notFound('That client');
+    let raw = body.definition;
+    if (raw === undefined) {
+      raw = (await queryOne<{ definition: unknown }>(
+        `SELECT definition FROM automation_versions WHERE automation_id = $1 ORDER BY version DESC LIMIT 1`,
+        [req.params.id]))?.definition;
+    }
+    const definition = DefinitionSchema.parse(raw);
+    const result = await dryRun(definition, user.organization_id, body.customer_id, body.application_id ?? null);
+    // The facts are what the conditions were tested against — shown so a
+    // surprising branch can be explained — minus anything empty.
+    const facts = Object.fromEntries(Object.entries(result.facts)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '' && typeof v !== 'object'));
+    res.json({ ...result, facts });
+  }),
+);
+
+// ── The execution log ──────────────────────────────────────────────────────
+
+automationRoutes.get(
+  '/automations/:id/executions',
+  requirePermission('automation.view'),
+  asyncRoute(async (req, res) => {
+    const user = req.user!;
+    const q = z.object({
+      outcome: z.enum(['executed', 'skipped', 'failed', 'branched', 'waiting', 'suppressed', 'all']).default('all'),
+      limit: z.coerce.number().int().min(1).max(500).default(200),
+    }).parse(req.query);
+    const params: unknown[] = [req.params.id, user.organization_id, q.limit];
+    const filter = q.outcome === 'all' ? '' : 'AND x.outcome = $4';
+    if (q.outcome !== 'all') params.push(q.outcome);
+    const { rows } = await query(
+      `SELECT x.id, x.at, x.node_key, x.node_type, x.outcome, x.reason, x.message_id, x.task_id,
+              e.id AS enrollment_id, e.automation_version, c.id AS customer_id, c.first_name, c.last_name,
+              e.application_id, v.definition
+         FROM automation_executions x
+         JOIN automation_enrollments e ON e.id = x.enrollment_id
+         JOIN customers c ON c.id = e.customer_id
+         LEFT JOIN automation_versions v ON v.automation_id = e.automation_id AND v.version = e.automation_version
+        WHERE e.automation_id = $1 AND e.organization_id = $2 ${filter}
+        ORDER BY x.at DESC, x.id DESC LIMIT $3`,
+      params);
+    res.json({
+      executions: rows.map((row) => {
+        const r = row as Record<string, unknown>;
+        const parsed = DefinitionSchema.safeParse(r.definition);
+        const step = parsed.success ? nodeByKey(parsed.data, String(r.node_key)) : null;
+        return { ...r, definition: undefined, label: step ? step.label ?? describeNode(step as never) : r.node_key };
+      }),
+    });
+  }),
+);
+
+async function freeKey(organizationId: string, base: string): Promise<string> {
+  const taken = await queryOne(
+    'SELECT 1 FROM automations WHERE organization_id = $1 AND key = $2', [organizationId, base]);
+  return taken ? `${base}_${Date.now().toString(36)}` : base;
+}
 
 function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48)

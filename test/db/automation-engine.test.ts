@@ -136,10 +136,11 @@ test('an event enrols the customer and the sequence runs to the end', async () =
 
   assert.deepEqual(await drain(enrollment!.id), ['confirm', 'task', 'notify', 'end']);
 
-  const final = await queryOne<{ status: string; messages_sent: number }>(
-    'SELECT status, messages_sent FROM automation_enrollments WHERE id = $1', [enrollment!.id]);
+  const final = await queryOne<{ status: string; messages_sent: number; steps_completed: number }>(
+    'SELECT status, messages_sent, steps_completed FROM automation_enrollments WHERE id = $1', [enrollment!.id]);
   assert.equal(final!.status, 'completed');
   assert.equal(final!.messages_sent, 1);
+  assert.equal(final!.steps_completed, 4, 'the last step counts as well');
 
   const { rows: executions } = await query('SELECT * FROM automation_executions');
   assert.equal(executions.length, 4, 'every node records what it did');

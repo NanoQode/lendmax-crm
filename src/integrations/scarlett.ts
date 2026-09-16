@@ -775,6 +775,14 @@ export async function pushDeal(
         applicationId,
       ],
     );
+    await client.query(
+      `INSERT INTO domain_events (organization_id, event_type, customer_id, application_id, payload,
+                                  actor_user_id, dedupe_key)
+       SELECT $1, 'lender.submitted', customer_id, id, $2::jsonb, $3, $4 FROM applications WHERE id = $5
+       ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`,
+      [organizationId, JSON.stringify({ lender: 'Scarlett', deal_id: dealId, overwrite: Boolean(options.overwrite) }),
+       options.actorUserId ?? null, `lender.submitted:${applicationId}:${dealId}:${Date.now()}`, applicationId],
+    );
   });
 
   log.info('scarlett deal pushed', { applicationId, dealId, unmapped: build.unmapped.length });

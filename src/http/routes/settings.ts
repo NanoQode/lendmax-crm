@@ -1,5 +1,5 @@
 /**
- * The administration screens: users, the vocabularies, templates, and the
+ * The administration screens: the vocabularies, templates, and the
  * dated settings a person is accountable for.
  *
  * Mounted under `/admin` rather than `/settings`, because systemRoutes
@@ -25,9 +25,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, queryOne, withTransaction } from '../../db/pool.ts';
 import { recordAudit } from '../../services/audit.ts';
-import { asyncRoute, AppError, notFound } from '../middleware/errors.ts';
+import { asyncRoute, AppError } from '../middleware/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
-import { can, PERMISSIONS, ROLES } from '../../domain/permissions.ts';
+import { can } from '../../domain/permissions.ts';
 import { validateTemplate, fieldsUsedBy, MERGE_FIELDS } from '../../domain/merge-fields.ts';
 import { EVALUATORS } from '../../domain/risk.ts';
 import { DEFAULT_CONSENT_RULES } from '../../domain/consent.ts';
@@ -85,6 +85,11 @@ settingsRoutes.get(
   asyncRoute(async (req, res) => {
     const name = z.enum(['stages', 'transaction_types', 'dispositions', 'document_categories'])
       .parse(req.params.name) as VocabularyName;
+    // Stages belong to pipelines now, and are changed one at a time on the
+    // Pipelines screen, where a stage in use cannot vanish from under its files.
+    if (name === 'stages') {
+      throw new AppError('Stages are managed under Pipelines now.', 410, 'moved');
+    }
     const spec = VOCABULARIES[name];
     const user = req.user!;
 
@@ -126,25 +131,16 @@ settingsRoutes.put(
   asyncRoute(async (req, res) => {
     const name = z.enum(['stages', 'transaction_types', 'dispositions', 'document_categories'])
       .parse(req.params.name) as VocabularyName;
+    // Stages belong to pipelines now, and are changed one at a time on the
+    // Pipelines screen, where a stage in use cannot vanish from under its files.
+    if (name === 'stages') {
+      throw new AppError('Stages are managed under Pipelines now.', 410, 'moved');
+    }
     const spec = VOCABULARIES[name];
     const user = req.user!;
     const body = z.object({
       items: z.array(z.record(z.string(), z.unknown())).min(1),
     }).parse(req.body);
-
-    // A brokerage with no won stage has a pipeline nothing can ever be
-    // funded into, and the failure appears weeks later at the first funding.
-    if (name === 'stages') {
-      const active = body.items.filter((i) => i.active !== false);
-      if (!active.some((i) => i.category === 'won')) {
-        throw new AppError(
-          'At least one active stage has to be the one that means funded. Nothing can be '
-          + 'funded otherwise.', 400);
-      }
-      if (!active.some((i) => i.category === 'lost')) {
-        throw new AppError('At least one active stage has to mean lost.', 400);
-      }
-    }
 
     const before = await query(`SELECT * FROM ${spec.table} WHERE organization_id = $1`,
       [user.organization_id]);
@@ -221,193 +217,8 @@ settingsRoutes.put(
   }),
 );
 
-// ── Users ──────────────────────────────────────────────────────────────────
-
-settingsRoutes.get(
-  '/admin/users',
-  requirePermission('user.view'),
-  asyncRoute(async (req, res) => {
-    const user = req.user!;
-    const { rows } = await query(
-      `SELECT u.id, u.email, u.name, u.role, u.active, u.mfa_enabled, u.last_login_at,
-              u.permission_overrides, u.created_at, u.locked_until,
-              p.mobile_phone, p.title, p.licence_number,
-              (SELECT count(*)::int FROM assignments a
-                WHERE a.user_id = u.id AND a.unassigned_at IS NULL) AS open_assignments
-         FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id
-        WHERE u.organization_id = $1
-        ORDER BY u.active DESC, u.name`, [user.organization_id]);
-
-    res.json({
-      users: rows,
-      roles: Object.entries(ROLES).map(([key, role]) => ({
-        key, name: role.name, description: role.description, permissions: role.permissions,
-      })),
-      permissions: PERMISSIONS,
-      can_edit: can(user, 'user.manage'),
-    });
-  }),
-);
-
-settingsRoutes.post(
-  '/admin/users',
-  requirePermission('user.manage'),
-  asyncRoute(async (req, res) => {
-    const user = req.user!;
-    const body = z.object({
-      email: z.string().email('That is not an email address.'),
-      name: z.string().trim().min(1),
-      role: z.enum(['broker', 'underwriter', 'manager', 'compliance_manager', 'technical_admin']),
-      title: z.string().trim().optional(),
-      mobile_phone: z.string().trim().optional(),
-      licence_number: z.string().trim().optional(),
-    }).parse(req.body);
-
-    const created = await withTransaction(async (client) => {
-      const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO users (organization_id, email, name, role, active, profile_complete,
-                            created_by)
-         VALUES ($1,$2,$3,$4,true,false,$5)
-         RETURNING id`,
-        [user.organization_id, body.email, body.name, body.role, user.id]);
-      const id = rows[0]!.id;
-      await client.query(
-        `INSERT INTO user_profiles (user_id, title, mobile_phone, licence_number)
-         VALUES ($1,$2,$3,$4) ON CONFLICT (user_id) DO NOTHING`,
-        [id, body.title ?? null, body.mobile_phone ?? null, body.licence_number ?? null]);
-      return id;
-    });
-
-    await recordAudit({
-      organizationId: user.organization_id,
-      actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip },
-      action: 'user.create',
-      entityType: 'user',
-      entityId: created,
-      summary: `${body.name} added as ${body.role.replace(/_/g, ' ')}`,
-    });
-
-    // No password is set here. The account is created inactive-until-invited
-    // rather than with a password an administrator chose and emailed.
-    res.status(201).json({ id: created, note: 'Send them an invitation to set a password.' });
-  }),
-);
-
-settingsRoutes.put(
-  '/admin/users/:id',
-  requirePermission('user.manage'),
-  asyncRoute(async (req, res) => {
-    const user = req.user!;
-    const body = z.object({
-      name: z.string().trim().min(1).optional(),
-      role: z.enum(['broker', 'underwriter', 'manager', 'compliance_manager', 'technical_admin'])
-        .optional(),
-      active: z.boolean().optional(),
-      title: z.string().trim().optional(),
-      mobile_phone: z.string().trim().optional(),
-      licence_number: z.string().trim().optional(),
-      permission_overrides: z.record(z.string(), z.boolean()).optional(),
-      override_reason: z.string().trim().optional(),
-    }).parse(req.body);
-
-    const target = await queryOne<{
-      id: string; name: string; role: string; active: boolean;
-      permission_overrides: Record<string, boolean>;
-    }>(
-      `SELECT id, name, role, active, permission_overrides FROM users
-        WHERE id = $1 AND organization_id = $2`,
-      [req.params.id, user.organization_id]);
-    if (!target) throw notFound('That user');
-
-    // Nobody removes their own access, and nobody leaves the brokerage with
-    // no technical admin — both are how an organisation locks itself out.
-    if (target.id === user.id && body.active === false) {
-      throw new AppError('You cannot deactivate your own account.', 400);
-    }
-    if (target.id === user.id && body.role && body.role !== target.role) {
-      throw new AppError('You cannot change your own role.', 400);
-    }
-    if ((body.active === false || (body.role && body.role !== 'technical_admin'))
-        && target.role === 'technical_admin') {
-      const others = await queryOne<{ count: number }>(
-        `SELECT count(*)::int AS count FROM users
-          WHERE organization_id = $1 AND role = 'technical_admin' AND active AND id <> $2`,
-        [user.organization_id, target.id]);
-      if (!others?.count) {
-        throw new AppError(
-          'That is the only technical admin. Appoint another one first, or the brokerage '
-          + 'locks itself out of its own settings.', 400);
-      }
-    }
-    if (body.permission_overrides && !can(user, 'user.manage')) {
-      throw new AppError('You cannot grant permissions.', 403);
-    }
-    if (body.permission_overrides && Object.keys(body.permission_overrides).length
-        && !body.override_reason) {
-      // An override is an exception to the role model. It is auditable, and
-      // an exception with no stated reason cannot be reviewed later.
-      throw new AppError('Say why this account needs an exception to its role.', 400);
-    }
-
-    await withTransaction(async (client) => {
-      const fields: string[] = [];
-      const params: unknown[] = [target.id];
-      for (const [column, value] of Object.entries({
-        name: body.name, role: body.role, active: body.active,
-      })) {
-        if (value === undefined) continue;
-        params.push(value);
-        fields.push(`${column} = $${params.length}`);
-      }
-      if (body.permission_overrides) {
-        params.push(JSON.stringify(body.permission_overrides));
-        fields.push(`permission_overrides = $${params.length}::jsonb`);
-      }
-      if (fields.length) {
-        await client.query(`UPDATE users SET ${fields.join(', ')} WHERE id = $1`, params);
-      }
-      if (body.title !== undefined || body.mobile_phone !== undefined
-          || body.licence_number !== undefined) {
-        await client.query(
-          `INSERT INTO user_profiles (user_id, title, mobile_phone, licence_number)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (user_id) DO UPDATE SET
-             title = COALESCE(EXCLUDED.title, user_profiles.title),
-             mobile_phone = COALESCE(EXCLUDED.mobile_phone, user_profiles.mobile_phone),
-             licence_number = COALESCE(EXCLUDED.licence_number, user_profiles.licence_number)`,
-          [target.id, body.title ?? null, body.mobile_phone ?? null,
-           body.licence_number ?? null]);
-      }
-      // Deactivating somebody leaves their files assigned to nobody, which
-      // is worse than leaving them assigned to a deactivated person — so the
-      // assignments are kept and the dashboard's "unassigned" count is what
-      // surfaces it.
-      if (body.active === false) {
-        await client.query(
-          `UPDATE sessions SET revoked_at = now()
-            WHERE user_id = $1 AND revoked_at IS NULL`, [target.id]);
-      }
-    });
-
-    await recordAudit({
-      organizationId: user.organization_id,
-      actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip },
-      action: 'user.update',
-      entityType: 'user',
-      entityId: target.id,
-      summary: body.active === false ? `${target.name} deactivated and signed out`
-        : body.role ? `${target.name} changed to ${body.role.replace(/_/g, ' ')}`
-        : body.permission_overrides
-          ? `${target.name} given a permission exception — ${body.override_reason}`
-          : `${target.name} updated`,
-      before: { role: target.role, active: target.active,
-                permission_overrides: target.permission_overrides },
-      after: body,
-    });
-
-    res.json({ ok: true });
-  }),
-);
+// Staff accounts moved to routes/staff.ts (the staff module), where
+// deactivating somebody requires handing over their leads.
 
 // ── Templates ──────────────────────────────────────────────────────────────
 

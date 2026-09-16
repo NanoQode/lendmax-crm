@@ -17,7 +17,8 @@ import { z } from 'zod';
 import { pool, query, queryOne, withTransaction } from '../../db/pool.ts';
 import { recordAudit } from '../../services/audit.ts';
 import { asyncRoute, AppError, notFound } from '../middleware/errors.ts';
-import { requireAuth, requirePermission } from '../middleware/auth.ts';
+import { actorOf, requireAuth, requirePermission } from '../middleware/auth.ts';
+import { collectedFromClient } from '../../services/compliance-collected.ts';
 import { can } from '../../domain/permissions.ts';
 import {
   approvalBlockers, deriveItem, gatherEvidence, openCase, reassess, refreshChecklist,
@@ -142,6 +143,26 @@ complianceRoutes.get(
       can_approve: blockers.length === 0 && can(user, 'compliance.review'),
       can_edit: can(user, 'compliance.edit'),
     });
+  }),
+);
+
+/**
+ * Everything collected from the client so far: contact details, each
+ * application section and its state, documents, consents and ID checks.
+ * Read under the same rules as the Application tab.
+ */
+complianceRoutes.get(
+  '/applications/:id/compliance/collected',
+  requirePermission('compliance.view'),
+  asyncRoute(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    if (!id.success) throw notFound('That application');
+    res.json({ ok: true, ...(await collectedFromClient({
+      actor: actorOf(req),
+      viewAll: can(req.user!, 'customer.view_all'),
+      edit: false,
+      viewFinancials: can(req.user!, 'pii.view_financials'),
+    }, id.data)) });
   }),
 );
 

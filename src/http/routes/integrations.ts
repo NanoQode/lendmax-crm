@@ -20,6 +20,7 @@ import { testEmail } from '../../integrations/email.ts';
 import { testVoipms } from '../../integrations/voipms.ts';
 import { pullCodes, pushDeal, testScarlett, buildDeal } from '../../integrations/scarlett.ts';
 import { queueStats } from '../../jobs/queue.ts';
+import { can } from '../../domain/permissions.ts';
 import { AppError, asyncRoute, notFound } from '../middleware/errors.ts';
 import { requireAuth, requirePermission } from '../middleware/auth.ts';
 
@@ -274,6 +275,37 @@ integrationRoutes.post(
 // ── Pushing a deal ─────────────────────────────────────────────────────────
 
 /**
+ * The file, if this person may send it: in the organisation, and theirs unless
+ * they can see every file. A 404 otherwise, as everywhere else.
+ */
+async function scarlettFile(user: NonNullable<Express.Request['user']>, id: string) {
+  const app = await queryOne<{
+    scarlett_deal_id: string | null; scarlett_synced_at: Date | null; archived_at: Date | null;
+    first_name: string | null; last_name: string | null; amount_requested: string | null;
+    property_city: string | null; property_province: string | null; portal_reference: string | null;
+  }>(
+    `SELECT app.scarlett_deal_id, app.scarlett_synced_at, app.archived_at, c.first_name, c.last_name,
+            app.amount_requested, app.property_city, app.property_province, app.portal_reference
+       FROM applications app JOIN customers c ON c.id = app.customer_id
+      WHERE app.id = $1 AND app.organization_id = $2
+        AND ($3::boolean OR EXISTS (SELECT 1 FROM assignments a WHERE a.application_id = app.id
+                                      AND a.unassigned_at IS NULL AND a.user_id = $4))`,
+    [id, user.organization_id, can(user, 'customer.view_all'), user.id],
+  );
+  if (!app) throw notFound('That application');
+  return app;
+}
+
+/**
+ * Files being sent right now. A double-click, or two people pressing the
+ * button together, would otherwise both pass the "already in Scarlett" check
+ * before either had a deal id — and a second deal in a broker network is not
+ * something this side can clean up. In memory, because this service runs as
+ * one process (deploy/lendmax-brokerage-crm.service).
+ */
+const pushing = new Set<string>();
+
+/**
  * What would be sent, and what is missing — before anything is sent.
  *
  * The screen shows this first. "Scarlett rejected the deal" after the fact is
@@ -285,11 +317,7 @@ integrationRoutes.get(
   asyncRoute(async (req, res) => {
     const id = z.string().uuid().parse(req.params.id);
     const user = req.user!;
-    const app = await queryOne<{ scarlett_deal_id: string | null }>(
-      'SELECT scarlett_deal_id FROM applications WHERE id = $1 AND organization_id = $2',
-      [id, user.organization_id],
-    );
-    if (!app) throw notFound('That application');
+    const app = await scarlettFile(user, id);
 
     const build = await buildDeal(user.organization_id, id);
     const resolved = await resolveIntegration(user.organization_id, 'scarlett');
@@ -300,10 +328,21 @@ integrationRoutes.get(
       warnings: build.warnings,
       unmapped: build.unmapped,
       alreadyPushed: app.scarlett_deal_id,
+      lastSyncedAt: app.scarlett_synced_at,
+      archived: !!app.archived_at,
+      file: {
+        client: `${app.first_name ?? ''} ${app.last_name ?? ''}`.trim() || null,
+        reference: app.portal_reference, amount_requested: app.amount_requested,
+        property: [app.property_city, app.property_province].filter(Boolean).join(', ') || null,
+      },
       mode: resolved.values.mode ?? 'sandbox',
-      configured: resolved.configured,
-      // The payload itself, so an admin can see exactly what would go.
-      deal: build.deal,
+      codesPulled: Boolean(await queryOne(
+        'SELECT 1 FROM scarlett_codes WHERE organization_id = $1 LIMIT 1', [user.organization_id])),
+      configured: resolved.configured && resolved.enabled,
+      missing: resolved.enabled ? resolved.missing : [...resolved.missing, 'the integration is switched off'],
+      // The payload itself, so whoever may read the income on it can see
+      // exactly what would go. Sending a file is not a grant to read it.
+      deal: can(user, 'pii.view_financials') ? build.deal : null,
     });
   }),
 );
@@ -317,14 +356,22 @@ integrationRoutes.post(
       .object({ accept_unmapped: z.boolean().default(false), overwrite: z.boolean().default(false) })
       .parse(req.body ?? {});
     const user = req.user!;
+    const file = await scarlettFile(user, id);
+    if (file.archived_at) throw new AppError('That file is archived. Restore it before sending it to Scarlett.', 409, 'archived');
 
     const resolved = await resolveIntegration(user.organization_id, 'scarlett');
+    if (!resolved.configured || !resolved.enabled) {
+      const missing = resolved.enabled ? resolved.missing : [...resolved.missing, 'the integration is switched off'];
+      throw new AppError(
+        `Scarlett is not connected yet${missing.length ? ` (missing: ${missing.join(', ')})` : ''}. ` +
+        'Set it up under Settings → Integrations.', 422, 'not_configured');
+    }
     if (resolved.values.mode === 'sandbox') {
       // Sandbox means nothing is sent. Said plainly rather than pretending to
       // succeed, so nobody believes a deal is in Scarlett when it is not.
       const build = await buildDeal(user.organization_id, id);
       res.json({
-        ok: false, sandbox: true,
+        ok: false, sandbox: true, code: 'sandbox',
         error: 'Scarlett is in sandbox mode, so nothing was sent. Switch it to live under ' +
                'Settings → Integrations when you are ready.',
         blockers: build.blockers, unmapped: build.unmapped, deal: build.deal,
@@ -332,15 +379,25 @@ integrationRoutes.post(
       return;
     }
 
-    const result = await pushDeal(user.organization_id, id, {
-      actorUserId: user.id,
-      acceptUnmapped: body.accept_unmapped,
-      overwrite: body.overwrite,
-    });
+    if (pushing.has(id)) {
+      throw new AppError('This file is already being sent to Scarlett. Wait a moment and refresh.', 409, 'in_progress');
+    }
+    pushing.add(id);
+    let result: Awaited<ReturnType<typeof pushDeal>>;
+    try {
+      result = await pushDeal(user.organization_id, id, {
+        actorUserId: user.id,
+        acceptUnmapped: body.accept_unmapped,
+        overwrite: body.overwrite,
+      });
+    } finally {
+      pushing.delete(id);
+    }
 
     if (!result.ok) {
       res.status(422).json({
-        ok: false, error: result.error, blockers: result.blockers, unmapped: result.unmapped,
+        ok: false, code: 'scarlett_refused', error: result.error, blockers: result.blockers,
+        unmapped: result.unmapped, retryable: result.retryable ?? false,
       });
       return;
     }
@@ -351,7 +408,8 @@ integrationRoutes.post(
       action: 'scarlett.push',
       entityType: 'application',
       entityId: id,
-      summary: `Pushed to Scarlett as ${result.dealId}`,
+      applicationId: id,
+      summary: `${body.overwrite ? 'Re-sent' : 'Sent'} ${file.portal_reference ?? 'a file'} to Scarlett as ${result.dealId}`,
       after: { dealId: result.dealId, unmapped: result.unmapped },
     });
 

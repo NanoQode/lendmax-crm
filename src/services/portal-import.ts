@@ -37,7 +37,9 @@ import { withTransaction } from '../db/pool.ts';
 import { log } from '../lib/logger.ts';
 import { toE164 } from '../lib/phone.ts';
 import { recordAudit } from './audit.ts';
+import { applyAnswerColumns } from './applications.ts';
 import { applyAssignmentRules } from './assignment.ts';
+import { entryStage } from './pipelines.ts';
 
 // ── The payload, as the portal actually sends it ───────────────────────────
 
@@ -242,6 +244,12 @@ async function resolveCustomer(
         str(payload.lead_source) ?? 'portal',
         JSON.stringify(payload.source_raw ?? {}),
       ],
+    );
+    await client.query(
+      `INSERT INTO domain_events (organization_id, event_type, customer_id, payload, dedupe_key)
+       VALUES ($1,'customer.created',$2,$3::jsonb,$4)
+       ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`,
+      [organizationId, rows[0]!.id, JSON.stringify({ source: 'portal' }), `customer.created:${rows[0]!.id}`],
     );
     return { customerId: rows[0]!.id, duplicates: 0 };
   }
@@ -694,11 +702,9 @@ export async function importMirrorPayload(
       // A new file lands on the first active stage. It is not forced onto one
       // later: a broker who has moved a file must not have the next mirror
       // push drag it back.
-      const { rows: stageRows } = await client.query<{ key: string }>(
-        `SELECT key FROM pipeline_stages WHERE organization_id = $1 AND active
-          ORDER BY position LIMIT 1`,
-        [organizationId],
-      );
+      // Into the pipeline that takes this purpose (or the default), on its
+      // first in-progress stage.
+      const entry = await entryStage(client, organizationId, fields.purpose);
       const transactionType = await defaultTransactionType(client, organizationId, fields.purpose);
 
       const insert: Record<string, unknown> = {
@@ -712,7 +718,7 @@ export async function importMirrorPayload(
         transaction_type_key: transactionType,
         scarlett_deal_id: fields.scarlett_deal_id,
         submitted_at: fields.submitted_at,
-        stage_key: stageRows[0]?.key ?? null,
+        stage_key: entry.stageKey,
         created_at: ts(payload.created_at) ?? new Date(),
       };
 
@@ -840,6 +846,16 @@ export async function importMirrorPayload(
         key: `created:${reference}`,
         payload: { reference, percent: fields.percent_complete },
       });
+      // A file first seen already submitted (the portal's first push can come
+      // after the client finished) is still a submission — otherwise a
+      // workflow on "Application submitted" never hears about it. The keys
+      // match the ones a later push would use, so it is never raised twice.
+      if (fields.submitted_at) {
+        events.push({ type: 'application.submitted', key: `submitted:${reference}`, payload: { reference } });
+      }
+      if (fields.percent_complete >= 100) {
+        events.push({ type: 'application.completed', key: `completed:${reference}`, payload: { reference } });
+      }
     } else {
       if (changedFields.portal_status) {
         events.push({
@@ -935,6 +951,15 @@ export async function importMirrorPayload(
       [organizationId, applicationId, reference, hash,
        created ? 'created' : changed ? 'updated' : 'unchanged', JSON.stringify(changedFields)],
     );
+
+    /* The brokerage's corrections go back over the columns this push just
+       wrote. `portal_data` above is the client's answers and stays exactly as
+       they left them; the corrections are laid over them on every read, and
+       this keeps the derived columns — the ones the board sorts on and the
+       reports group by — agreeing with what the file actually shows.
+
+       Inside the transaction, so a push either lands complete or not at all. */
+    await applyAnswerColumns(applicationId, client);
 
     return { id: applicationId, created, changed, changedFields, customerId, duplicates };
   });

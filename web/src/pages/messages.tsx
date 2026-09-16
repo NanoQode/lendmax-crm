@@ -14,7 +14,7 @@
 import { useState } from 'preact/hooks';
 import { ApiError, formatDateTime, post, relativeTime } from '../lib/api.ts';
 import { navigate, toast, useAsync, type Session } from '../lib/store.ts';
-import { Badge, Empty, ErrorNote, Field, Skeleton } from '../components/ui.tsx';
+import { Badge, Empty, ErrorNote, Field, SearchSelect, Skeleton } from '../components/ui.tsx';
 
 type Message = {
   id: string; channel: string; direction: string; origin: string; purpose: string;
@@ -182,11 +182,14 @@ function Composer({ channel, customerId, applicationId, gate, templates, onClose
   const [text, setText] = useState('');
   const [purpose, setPurpose] = useState('transactional');
   const [urgent, setUrgent] = useState(false);
+  const [signed, setSigned] = useState(true);
+  const [templateKey, setTemplateKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [detail, setDetail] = useState<string[]>([]);
   const [preview, setPreview] = useState<{
     text: string; subject: string | null; missing: string[]; dropped: string[];
+    html: string | null; signature: { text: string; html: string } | null;
     empty: boolean; issues: Array<{ message: string }>;
     segments: { segments: number; encoding: string; characters: number;
                 offenders: string[] } | null;
@@ -199,7 +202,7 @@ function Composer({ channel, customerId, applicationId, gate, templates, onClose
   const runPreview = async () => {
     try {
       const result = await post(`/customers/${customerId}/messages/preview`,
-        { channel, subject, body_text: text, application_id: applicationId });
+        { channel, subject, body_text: text, application_id: applicationId, include_signature: signed });
       setPreview(result as never);
     } catch { /* the preview is a convenience; its failure is not an error */ }
   };
@@ -210,7 +213,7 @@ function Composer({ channel, customerId, applicationId, gate, templates, onClose
       const result = await post<{ ok: boolean; reason: string; dropped: string[] }>(
         `/customers/${customerId}/messages`, {
           channel, purpose, subject: subject || undefined, body_text: text,
-          application_id: applicationId, urgent,
+          application_id: applicationId, urgent, include_signature: signed,
         });
       toast(result.ok ? 'Sent.' : `Not sent — ${result.reason}`, result.ok ? 'ok' : 'info');
       onSent();
@@ -246,17 +249,18 @@ function Composer({ channel, customerId, applicationId, gate, templates, onClose
 
         {usable.length > 0 && (
           <Field label="Start from a template">
-            <select onChange={(e) => {
-              const template = usable.find(
-                (t) => t.key === (e.target as HTMLSelectElement).value);
-              if (!template) return;
-              setSubject(template.subject ?? '');
-              setText(template.body_text);
-              setPreview(null);
-            }}>
-              <option value="">Write it myself</option>
-              {usable.map((t) => <option key={t.key} value={t.key}>{t.name}</option>)}
-            </select>
+            <SearchSelect value={templateKey} ariaLabel="Start from a template"
+                          searchPlaceholder="Search templates…"
+                          options={[{ value: '', label: 'Write it myself' },
+                                    ...usable.map((t) => ({ value: t.key, label: t.name }))]}
+                          onChange={(key) => {
+                            setTemplateKey(key);
+                            const template = usable.find((t) => t.key === key);
+                            if (!template) return;
+                            setSubject(template.subject ?? '');
+                            setText(template.body_text);
+                            setPreview(null);
+                          }} />
           </Field>
         )}
 
@@ -283,18 +287,28 @@ function Composer({ channel, customerId, applicationId, gate, templates, onClose
             ? 'Commercial content. Goes only to clients with a marketing consent.'
             : 'About the mortgage this client asked us to arrange.'}
         >
-          <select value={purpose}
-                  onChange={(e) => setPurpose((e.target as HTMLSelectElement).value)}>
-            <option value="transactional">About their own file</option>
-            <option value="service">A service notice</option>
-            <option value="marketing">Commercial — rates, news, an offer</option>
-          </select>
+          <SearchSelect value={purpose} onChange={setPurpose} ariaLabel="What kind of message is this"
+                        options={[{ value: 'transactional', label: 'About their own file' },
+                                  { value: 'service', label: 'A service notice' },
+                                  { value: 'marketing', label: 'Commercial — rates, news, an offer' }]} />
         </Field>
 
         <div class="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           <button class="btn btn-sm" onClick={runPreview} disabled={!text.trim()}>
             Preview
           </button>
+          {channel === 'email' && (
+            <label class="check" style={{ margin: 0 }}>
+              <input type="checkbox" checked={signed}
+                     onChange={(e) => { setSigned((e.target as HTMLInputElement).checked); setPreview(null); }} />
+              <span class="text-sm">
+                Add my signature
+                <span class="text-subtle d-block">
+                  {text.includes('{signature}') ? 'Placed where {signature} is in the message.' : 'At the bottom. Edit it under Your profile.'}
+                </span>
+              </span>
+            </label>
+          )}
           <label class="check" style={{ margin: 0 }}>
             <input type="checkbox" checked={urgent}
                    onChange={(e) => setUrgent((e.target as HTMLInputElement).checked)} />
@@ -315,7 +329,14 @@ function Composer({ channel, customerId, applicationId, gate, templates, onClose
               </div>
             )}
             {preview.subject && <div class="preview-subject">{preview.subject}</div>}
-            <pre class="preview-body">{preview.text || '(nothing would be sent)'}</pre>
+            {preview.signature ? (
+              <div class="preview-body preview-email">
+                {/* Server-rendered from escaped text: the message, then the signature. */}
+                <div dangerouslySetInnerHTML={{ __html: preview.html ?? '' }} />
+              </div>
+            ) : (
+              <pre class="preview-body">{preview.text || '(nothing would be sent)'}</pre>
+            )}
             {preview.dropped.length > 0 && (
               <div class="text-sm text-muted">
                 {preview.dropped.length} line(s) left out — no value for{' '}
@@ -374,13 +395,14 @@ export function MessagesPage({ session }: { session: Session }) {
           <h1>Messages</h1>
           <p>What has come in, and what is still waiting on a reply.</p>
         </div>
-        <select value={filter} onChange={(e) => setFilter((e.target as HTMLSelectElement).value)}>
-          <option value="unread">Unread</option>
-          <option value="inbound">Everything inbound</option>
-          <option value="awaiting_reply">Waiting on us</option>
-          <option value="suppressed">Not sent</option>
-          <option value="all">Everything</option>
-        </select>
+        <div style={{ width: 220 }}>
+          <SearchSelect value={filter} onChange={setFilter} ariaLabel="Show"
+                        options={[{ value: 'unread', label: 'Unread' },
+                                  { value: 'inbound', label: 'Everything inbound' },
+                                  { value: 'awaiting_reply', label: 'Waiting on us' },
+                                  { value: 'suppressed', label: 'Not sent' },
+                                  { value: 'all', label: 'Everything' }]} />
+        </div>
       </div>
 
       {state.status === 'loading' && <Skeleton rows={5} height={60} />}

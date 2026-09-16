@@ -218,6 +218,16 @@ export function renderCampaign(
         break;
       }
       case 'signature': {
+        // The sender's own signature, when they have one. It was rendered
+        // from escaped text by domain/signature.ts, so it is safe to place
+        // as HTML here.
+        const own = context.values.user_signature_html;
+        const ownText = context.values.signature;
+        if (typeof own === 'string' && own && typeof ownText === 'string' && ownText) {
+          html.push(own);
+          text.push(`\n${ownText}`);
+          break;
+        }
         const name = merge('{user_name}');
         if (name === null) {
           problems.push('The signature block has no name to sign with.');

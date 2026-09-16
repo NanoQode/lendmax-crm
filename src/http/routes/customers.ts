@@ -16,26 +16,25 @@ import { query, queryOne, withTransaction } from '../../db/pool.ts';
 import { recordAudit } from '../../services/audit.ts';
 import { refreshChecklist } from '../../services/compliance.ts';
 import { can } from '../../domain/permissions.ts';
-import { evaluateTransition, transitionEffects, type FileSnapshot, type StageDefinition } from '../../domain/pipeline.ts';
 import { daysToClose, todayIn } from '../../domain/dates.ts';
 import { env } from '../../config/env.ts';
 import { AppError, asyncRoute, notFound } from '../middleware/errors.ts';
-import { requireAuth, requirePermission } from '../middleware/auth.ts';
-import { toE164 } from '../../lib/phone.ts';
+import { actorOf, requireAuth, requirePermission } from '../middleware/auth.ts';
+import { assignLead, createLead } from '../../services/leads.ts';
+import { loadStages, moveFileToStage } from '../../services/stage-moves.ts';
+import { pipelineCatalogue } from '../../services/pipelines.ts';
+import { recordFileView } from '../../services/activity.ts';
+import { pool } from '../../db/pool.ts';
+import {
+  dismissDuplicate, findDuplicates, loadCustomer, mergeCustomers, searchCustomers, setArchived,
+  updateCustomer, type CustomerScope,
+} from '../../services/customers.ts';
 
 export const customerRoutes: Router = Router();
 customerRoutes.use(requireAuth);
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-async function loadStages(organizationId: string): Promise<StageDefinition[]> {
-  const { rows } = await query<StageDefinition>(
-    `SELECT key, label, position, category, probability, active, entry_rules
-       FROM pipeline_stages WHERE organization_id = $1 ORDER BY position`,
-    [organizationId],
-  );
-  return rows.map((r) => ({ ...r, probability: r.probability === null ? null : Number(r.probability) }));
-}
 
 /**
  * The visibility clause. A broker sees files they are assigned to; anybody with
@@ -59,8 +58,10 @@ const SORTABLE: Record<string, string> = {
   closing: 'app.closing_date',
   created: 'app.created_at',
   amount: 'app.amount_requested',
-  name: 'c.last_name',
-  stage: 'app.stage_key',
+  name: 'lower(c.last_name || \' \' || c.first_name)',
+  stage: 'ps.position',
+  pipeline: 'lower(pl.name)',
+  property: 'lower(app.property_city)',
 };
 
 // ── The list ───────────────────────────────────────────────────────────────
@@ -78,7 +79,230 @@ const ListQuery = z.object({
   direction: z.enum(['asc', 'desc']).default('desc'),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
-});
+  // The table's column filters and paging (web/src/components/data-table.tsx).
+  client: z.string().trim().max(100).optional(),
+  property: z.string().trim().max(100).optional(),
+  amount: z.enum(['lt250', '250_500', '500_1000', 'gt1000', 'none']).optional(),
+  closing: z.enum(['overdue', '14', '30', 'later', 'none']).optional(),
+  assignee: z.union([z.string().uuid(), z.literal('__none')]).optional(),
+  flag: z.enum(['awaiting_reply', 'documents', 'scarlett', 'incomplete']).optional(),
+  activity: z.enum(['today', 'week', 'month', 'older']).optional(),
+  pipeline: z.string().uuid().optional(),
+  dir: z.enum(['asc', 'desc']).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  /** 'true' lists archived files instead of live ones. */
+  archived: z.enum(['true', 'false']).optional(),
+  page_size: z.coerce.number().int().min(1).max(200).optional(),
+}).transform((q) => ({
+  ...q,
+  direction: q.dir ?? q.direction,
+  limit: q.page_size ?? q.limit,
+  offset: q.page ? (q.page - 1) * (q.page_size ?? q.limit) : q.offset,
+}));
+
+/**
+ * The WHERE clause for the list, shared with the export so a CSV is exactly
+ * the rows the screen was showing, filters and visibility included.
+ */
+function listWhere(
+  q: z.infer<typeof ListQuery>,
+  user: { id: string; organization_id: string; role: string; permission_overrides: Record<string, boolean> },
+  params: unknown[],
+): string[] {
+  const where: string[] = ['app.organization_id = $1',
+    q.archived === 'true' ? 'app.archived_at IS NOT NULL' : 'app.archived_at IS NULL'];
+
+  where.push(visibilityClause(user, params));
+
+  if (q.q) {
+    // One parameter used across several columns. Searching the property
+    // address as well as the name is what makes the box useful on the phone
+    // when a client says "it's the Main Street one".
+    params.push(`%${q.q.toLowerCase()}%`);
+    const p = `$${params.length}`;
+    const digits = q.q.replace(/\D/g, '');
+    let phoneClause = '';
+    if (digits.length >= 7) {
+      params.push(`%${digits.slice(-10)}%`);
+      phoneClause = ` OR regexp_replace(coalesce(c.phone_e164,''), '\\D', '', 'g') LIKE $${params.length}`;
+    }
+    where.push(`(
+      lower(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) LIKE ${p}
+      OR lower(coalesce(c.email,'')) LIKE ${p}
+      OR lower(coalesce(app.portal_reference,'')) LIKE ${p}
+      OR lower(coalesce(app.property_city,'')) LIKE ${p}
+      OR lower(coalesce(app.property_street_name,'')) LIKE ${p}
+      OR lower(coalesce(app.scarlett_deal_id,'')) LIKE ${p}
+      ${phoneClause}
+    )`);
+  }
+  if (q.stage) {
+    params.push(q.stage);
+    where.push(`app.stage_key = $${params.length}`);
+  }
+  if (q.transaction_type) {
+    params.push(q.transaction_type);
+    where.push(`app.transaction_type_key = $${params.length}`);
+  }
+  if (q.province) {
+    params.push(q.province.toUpperCase());
+    where.push(`app.property_province = $${params.length}`);
+  }
+  if (q.closing_before) {
+    params.push(q.closing_before);
+    where.push(`app.closing_date <= $${params.length}::date`);
+  }
+  if (q.closing_after) {
+    params.push(q.closing_after);
+    where.push(`app.closing_date >= $${params.length}::date`);
+  }
+  if (q.assigned_to) {
+    params.push(q.assigned_to);
+    where.push(`EXISTS (SELECT 1 FROM assignments a2 WHERE a2.application_id = app.id
+                          AND a2.unassigned_at IS NULL AND a2.user_id = $${params.length})`);
+  }
+  if (q.status !== 'all') {
+    params.push(q.status);
+    where.push(`ps.category = $${params.length}`);
+  }
+  if (q.pipeline) {
+    params.push(q.pipeline);
+    where.push(`app.pipeline_id = $${params.length}`);
+  }
+  if (q.client) {
+    params.push(`%${q.client.toLowerCase()}%`);
+    where.push(`(lower(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) LIKE $${params.length}
+                 OR lower(coalesce(c.email,'')) LIKE $${params.length}
+                 OR coalesce(c.phone_e164,'') LIKE $${params.length})`);
+  }
+  if (q.property) {
+    params.push(`%${q.property.toLowerCase()}%`);
+    where.push(`lower(concat_ws(' ', app.property_street_number, app.property_street_name,
+                                app.property_city, app.property_province)) LIKE $${params.length}`);
+  }
+  if (q.amount) {
+    where.push({
+      lt250: 'app.amount_requested < 250000',
+      '250_500': 'app.amount_requested >= 250000 AND app.amount_requested < 500000',
+      '500_1000': 'app.amount_requested >= 500000 AND app.amount_requested < 1000000',
+      gt1000: 'app.amount_requested >= 1000000',
+      none: 'app.amount_requested IS NULL',
+    }[q.amount]);
+  }
+  if (q.closing) {
+    // Won and lost files have closed or never will; a window filter is about
+    // the ones still in play.
+    const open = `COALESCE(ps.category, 'open') NOT IN ('won','lost')`;
+    where.push({
+      overdue: `app.closing_date < CURRENT_DATE AND ${open}`,
+      '14': `app.closing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 14 AND ${open}`,
+      '30': `app.closing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 30 AND ${open}`,
+      later: `app.closing_date > CURRENT_DATE + 30`,
+      none: 'app.closing_date IS NULL',
+    }[q.closing]);
+  }
+  if (q.assignee === '__none') {
+    where.push(`NOT EXISTS (SELECT 1 FROM assignments a3 WHERE a3.application_id = app.id
+                              AND a3.unassigned_at IS NULL AND a3.role = 'broker')`);
+  } else if (q.assignee) {
+    params.push(q.assignee);
+    where.push(`EXISTS (SELECT 1 FROM assignments a3 WHERE a3.application_id = app.id
+                          AND a3.unassigned_at IS NULL AND a3.user_id = $${params.length})`);
+  }
+  if (q.flag) {
+    where.push({
+      awaiting_reply: 'c.awaiting_reply_since IS NOT NULL',
+      documents: 'app.documents_outstanding > 0',
+      scarlett: `app.scarlett_sync_state = 'error'`,
+      incomplete: 'app.percent_complete < 100',
+    }[q.flag]);
+  }
+  if (q.activity) {
+    where.push({
+      today: `app.last_activity_at >= date_trunc('day', now())`,
+      week: `app.last_activity_at >= now() - interval '7 days'`,
+      month: `app.last_activity_at >= now() - interval '31 days'`,
+      older: `(app.last_activity_at < now() - interval '31 days' OR app.last_activity_at IS NULL)`,
+    }[q.activity]);
+  }
+  return where;
+}
+
+// ── Export ─────────────────────────────────────────────────────────────────
+
+/** A cell that a spreadsheet will not run as a formula. */
+const csvCell = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  let text = value instanceof Date ? value.toISOString() : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+const EXPORT_LIMIT = 50_000;
+
+/**
+ * The list as CSV — the same filters, the same visibility, every page. Audited
+ * with the filters used, because a spreadsheet of client contact details is
+ * the easiest thing in this system to walk out of the door with.
+ */
+customerRoutes.get(
+  '/customers/export',
+  requirePermission('customer.export'),
+  asyncRoute(async (req, res) => {
+    const q = ListQuery.parse(req.query);
+    const user = req.user!;
+    const params: unknown[] = [user.organization_id];
+    const where = listWhere(q, user, params);
+    params.push(EXPORT_LIMIT);
+
+    const { rows } = await query<Record<string, unknown>>(
+      `SELECT app.portal_reference, c.first_name, c.last_name, c.email, c.phone_e164,
+              pl.name AS pipeline, ps.label AS stage, tt.label AS transaction_type,
+              app.amount_requested, app.closing_date,
+              concat_ws(' ', app.property_street_number, app.property_street_name) AS property_street,
+              app.property_city, app.property_province,
+              (SELECT string_agg(u.name, '; ' ORDER BY a.is_primary DESC)
+                 FROM assignments a JOIN users u ON u.id = a.user_id
+                WHERE a.application_id = app.id AND a.unassigned_at IS NULL AND a.role = 'broker') AS broker,
+              c.lead_source, app.documents_outstanding, app.percent_complete,
+              app.created_at, app.last_activity_at, app.archived_at
+         FROM applications app
+         JOIN customers c ON c.id = app.customer_id
+         LEFT JOIN pipeline_stages ps ON ps.organization_id = app.organization_id AND ps.key = app.stage_key
+         LEFT JOIN pipelines pl ON pl.id = app.pipeline_id
+         LEFT JOIN transaction_types tt
+                ON tt.organization_id = app.organization_id AND tt.key = app.transaction_type_key
+        WHERE ${where.join(' AND ')}
+        ORDER BY ${SORTABLE[q.sort]!} ${q.direction === 'asc' ? 'ASC NULLS LAST' : 'DESC NULLS LAST'}, app.id
+        LIMIT $${params.length}`,
+      params,
+    );
+
+    const headers = ['Reference', 'First name', 'Last name', 'Email', 'Phone', 'Pipeline', 'Stage',
+      'Transaction type', 'Amount requested', 'Closing date', 'Property street', 'Property city',
+      'Province', 'Broker', 'Lead source', 'Documents outstanding', 'Application % complete',
+      'Created', 'Last activity', 'Archived'];
+    const lines = [headers.join(',')];
+    for (const r of rows) lines.push(Object.values(r).map(csvCell).join(','));
+
+    const filters = Object.fromEntries(Object.entries(req.query).filter(([k]) => !['page', 'page_size', 'limit', 'offset'].includes(k)));
+    await recordAudit({
+      organizationId: user.organization_id,
+      actor: { userId: user.id, name: user.name, role: user.role, kind: 'user', ip: req.ip },
+      action: 'customer.export',
+      entityType: 'customer',
+      summary: `Exported ${rows.length} customer file${rows.length === 1 ? '' : 's'} to CSV`,
+      after: { rows: rows.length, filters, truncated: rows.length === EXPORT_LIMIT },
+    });
+
+    const stamp = todayIn(user.timezone ?? env.BROKERAGE_TIMEZONE);
+    res.setHeader('content-type', 'text/csv; charset=utf-8');
+    res.setHeader('content-disposition', `attachment; filename="lendmax-customers-${stamp}.csv"`);
+    res.setHeader('cache-control', 'no-store');
+    // A byte-order mark, so Excel reads accented names as UTF-8.
+    res.send(`﻿${lines.join('\r\n')}\r\n`);
+  }),
+);
 
 customerRoutes.get(
   '/customers',
@@ -87,61 +311,7 @@ customerRoutes.get(
     const q = ListQuery.parse(req.query);
     const user = req.user!;
     const params: unknown[] = [user.organization_id];
-    const where: string[] = ['app.organization_id = $1', 'app.archived_at IS NULL'];
-
-    where.push(visibilityClause(user, params));
-
-    if (q.q) {
-      // One parameter used across several columns. Searching the property
-      // address as well as the name is what makes the box useful on the phone
-      // when a client says "it's the Main Street one".
-      params.push(`%${q.q.toLowerCase()}%`);
-      const p = `$${params.length}`;
-      const digits = q.q.replace(/\D/g, '');
-      let phoneClause = '';
-      if (digits.length >= 7) {
-        params.push(`%${digits.slice(-10)}%`);
-        phoneClause = ` OR regexp_replace(coalesce(c.phone_e164,''), '\\D', '', 'g') LIKE $${params.length}`;
-      }
-      where.push(`(
-        lower(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) LIKE ${p}
-        OR lower(coalesce(c.email,'')) LIKE ${p}
-        OR lower(coalesce(app.portal_reference,'')) LIKE ${p}
-        OR lower(coalesce(app.property_city,'')) LIKE ${p}
-        OR lower(coalesce(app.property_street_name,'')) LIKE ${p}
-        OR lower(coalesce(app.scarlett_deal_id,'')) LIKE ${p}
-        ${phoneClause}
-      )`);
-    }
-    if (q.stage) {
-      params.push(q.stage);
-      where.push(`app.stage_key = $${params.length}`);
-    }
-    if (q.transaction_type) {
-      params.push(q.transaction_type);
-      where.push(`app.transaction_type_key = $${params.length}`);
-    }
-    if (q.province) {
-      params.push(q.province.toUpperCase());
-      where.push(`app.property_province = $${params.length}`);
-    }
-    if (q.closing_before) {
-      params.push(q.closing_before);
-      where.push(`app.closing_date <= $${params.length}::date`);
-    }
-    if (q.closing_after) {
-      params.push(q.closing_after);
-      where.push(`app.closing_date >= $${params.length}::date`);
-    }
-    if (q.assigned_to) {
-      params.push(q.assigned_to);
-      where.push(`EXISTS (SELECT 1 FROM assignments a2 WHERE a2.application_id = app.id
-                            AND a2.unassigned_at IS NULL AND a2.user_id = $${params.length})`);
-    }
-    if (q.status !== 'all') {
-      params.push(q.status);
-      where.push(`ps.category = $${params.length}`);
-    }
+    const where = listWhere(q, user, params);
 
     const orderColumn = SORTABLE[q.sort]!;
     params.push(q.limit, q.offset);
@@ -157,12 +327,14 @@ customerRoutes.get(
              c.id AS customer_id, c.first_name, c.last_name, c.email, c.phone_e164,
              c.awaiting_reply_since,
              ps.label AS stage_label, ps.category AS stage_category, ps.colour AS stage_colour,
+             app.pipeline_id, pl.name AS pipeline_name,
              COALESCE(assignees.list, '[]'::json) AS assignees,
              COUNT(*) OVER () AS total_count
         FROM applications app
         JOIN customers c ON c.id = app.customer_id
         LEFT JOIN pipeline_stages ps
                ON ps.organization_id = app.organization_id AND ps.key = app.stage_key
+        LEFT JOIN pipelines pl ON pl.id = app.pipeline_id
         LEFT JOIN LATERAL (
           SELECT json_agg(json_build_object('user_id', u.id, 'name', u.name,
                                             'role', a.role, 'primary', a.is_primary)
@@ -203,9 +375,17 @@ customerRoutes.get(
   requirePermission('customer.view'),
   asyncRoute(async (req, res) => {
     const user = req.user!;
-    const stages = await loadStages(user.organization_id);
+    // One pipeline at a time: the one asked for, else the default.
+    const { pipeline: asked } = z.object({ pipeline: z.string().max(60).optional() }).parse(req.query);
+    const catalogue = await pipelineCatalogue(pool, user.organization_id);
+    const pipeline = catalogue.find((p) => p.id === asked || p.key === asked)
+      ?? catalogue.find((p) => p.is_default) ?? catalogue[0];
+    if (!pipeline) throw notFound('A pipeline');
+    const stages = (await loadStages(user.organization_id)).filter((s) => s.pipeline_id === pipeline.id);
     const params: unknown[] = [user.organization_id];
     const visibility = visibilityClause(user, params);
+    params.push(pipeline.id);
+    const inPipeline = `app.pipeline_id = $${params.length}`;
 
     // Capped per column. A board that renders four thousand cards in one
     // column is not a board; the count says what is there, the cards are the
@@ -228,7 +408,7 @@ customerRoutes.get(
                FROM assignments a JOIN users u ON u.id = a.user_id
               WHERE a.application_id = app.id AND a.unassigned_at IS NULL
            ) assignees ON TRUE
-          WHERE app.organization_id = $1 AND app.archived_at IS NULL AND ${visibility}
+          WHERE app.organization_id = $1 AND app.archived_at IS NULL AND ${visibility} AND ${inPipeline}
        ) ranked WHERE rn <= 50`,
       params,
     );
@@ -237,7 +417,7 @@ customerRoutes.get(
       `SELECT app.stage_key, COUNT(*)::text AS count,
               COALESCE(SUM(app.amount_requested), 0)::text AS value
          FROM applications app
-        WHERE app.organization_id = $1 AND app.archived_at IS NULL AND ${visibility}
+        WHERE app.organization_id = $1 AND app.archived_at IS NULL AND ${visibility} AND ${inPipeline}
         GROUP BY app.stage_key`,
       params,
     );
@@ -246,8 +426,13 @@ customerRoutes.get(
 
     res.json({
       ok: true,
+      pipeline: { id: pipeline.id, key: pipeline.key, name: pipeline.name, active: pipeline.active },
+      pipelines: catalogue.map((p) => ({ id: p.id, key: p.key, name: p.name, active: p.active,
+                                         is_default: p.is_default, files_open: p.files_open })),
       columns: stages
-        .filter((s) => s.active)
+        // An inactive stage still shows while files sit on it, so they are
+        // not hidden from the people who need to move them on.
+        .filter((s) => s.active || countBy.has(s.key))
         .map((stage) => {
           const stat = countBy.get(stage.key);
           const value = Number(stat?.value ?? 0);
@@ -303,6 +488,10 @@ customerRoutes.get(
       // is itself a disclosure.
       if (!mine) throw notFound('That application');
     }
+
+    // "Opened a client file", for the activity log — once per half hour, and
+    // never in the way of the response.
+    void recordFileView(actorOf(req), id);
 
     // Financial detail is a separate grant from the file it sits on.
     const showFinancials = can(user, 'pii.view_financials');
@@ -434,156 +623,14 @@ customerRoutes.post(
   '/applications/:id/stage',
   requirePermission('pipeline.move'),
   asyncRoute(async (req, res) => {
-    const id = z.string().uuid().parse(req.params.id);
-    const body = z
-      .object({
-        stage_key: z.string().min(1),
-        reason: z.string().optional(),
-        force: z.boolean().default(false),
-        lost_disposition_key: z.string().optional(),
-        lost_reason_note: z.string().optional(),
-      })
-      .parse(req.body);
-    const user = req.user!;
-
-    const stages = await loadStages(user.organization_id);
-    const target = stages.find((s) => s.key === body.stage_key);
-    if (!target) throw new AppError(`No stage called "${body.stage_key}".`, 422, 'unknown_stage');
-
-    // Forcing past an entry rule is a deliberate act with a permission of its
-    // own; a broker cannot quietly skip the compliance gate on the way to
-    // Funded.
-    if (body.force && !can(user, 'pipeline.configure')) {
-      throw new AppError(
-        'Overriding a stage rule needs the pipeline configuration permission. ' +
-          'Ask a manager, or complete what is outstanding.',
-        403,
-        'forbidden',
-      );
-    }
-
-    const result = await withTransaction(async (client) => {
-      const { rows } = await client.query<FileSnapshot & { id: string; organization_id: string }>(
-        `SELECT app.id, app.organization_id, app.stage_key, app.stage_changed_at,
-                app.percent_complete, app.amount_requested, app.closing_date,
-                app.property_province, app.transaction_type_key, app.scarlett_deal_id,
-                COALESCE($3, app.lost_disposition_key) AS lost_disposition_key,
-                COALESCE(f.confirmed, false) AS funding_confirmed,
-                f.funded_amount, f.lender_name,
-                COALESCE((SELECT COUNT(*) FROM compliance_checklist_items i
-                            JOIN compliance_cases cc ON cc.id = i.compliance_case_id
-                           WHERE cc.application_id = app.id AND i.required
-                             AND i.status = 'outstanding'), 0)::int AS compliance_outstanding_required,
-                COALESCE((SELECT COUNT(*) FROM appointments ap
-                           WHERE ap.application_id = app.id
-                             AND ap.status <> 'cancelled'), 0)::int AS appointment_count
-           FROM applications app
-           LEFT JOIN funding_records f ON f.application_id = app.id
-          WHERE app.id = $1 AND app.organization_id = $2
-          FOR UPDATE OF app`,
-        [id, user.organization_id, body.lost_disposition_key ?? null],
-      );
-      const file = rows[0];
-      if (!file) throw notFound('That application');
-
-      const decision = evaluateTransition(file, target, { force: body.force });
-      if (!decision.allowed) return { decision };
-
-      const from = stages.find((s) => s.key === file.stage_key) ?? null;
-      const effects = transitionEffects(from, target);
-
-      const sets: string[] = ['stage_key = $2', 'stage_changed_at = now()', 'last_activity_at = now()'];
-      const params: unknown[] = [id, target.key];
-      for (const field of effects.clearFields) sets.push(`${field} = NULL`);
-      if (target.category === 'lost') {
-        sets.push('lost_at = now()');
-        if (body.lost_disposition_key) {
-          params.push(body.lost_disposition_key);
-          sets.push(`lost_disposition_key = $${params.length}`);
-        }
-        if (body.lost_reason_note) {
-          params.push(body.lost_reason_note);
-          sets.push(`lost_reason_note = $${params.length}`);
-        }
-      }
-      await client.query(`UPDATE applications SET ${sets.join(', ')} WHERE id = $1`, params);
-
-      await client.query(
-        `INSERT INTO stage_transitions (application_id, from_stage_key, to_stage_key,
-                                        actor_user_id, reason, seconds_in_from_stage)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [id, file.stage_key, target.key, user.id, body.reason ?? null, decision.secondsInFromStage],
-      );
-
-      // Automations that were about the old stage are ended here, inside the
-      // same transaction as the move. A file that is funded with its nurture
-      // sequence still running is the failure this prevents.
-      let stoppedEnrollments = 0;
-      for (const reason of effects.stopAutomationReasons) {
-        const stopped = await client.query(
-          `UPDATE automation_enrollments
-              SET status = 'stopped', stopped_at = now(), stopped_reason = $2, next_run_at = NULL
-            WHERE application_id = $1 AND status IN ('active','paused')`,
-          [id, reason],
-        );
-        stoppedEnrollments += stopped.rowCount ?? 0;
-      }
-
-      for (const eventType of effects.events) {
-        await client.query(
-          `INSERT INTO domain_events (organization_id, event_type, customer_id, application_id,
-                                      payload, actor_user_id)
-           SELECT $1, $2, customer_id, id, $3::jsonb, $4 FROM applications WHERE id = $5`,
-          [user.organization_id, eventType,
-           JSON.stringify({ from: file.stage_key, to: target.key }), user.id, id],
-        );
-      }
-
-      const summary = `Stage changed from ${from?.label ?? 'none'} to ${target.label}` +
-        (body.force ? ' (rules overridden)' : '');
-
-      await client.query(
-        `INSERT INTO activity (organization_id, application_id, customer_id, kind,
-                               actor_user_id, actor_name, summary, detail)
-         SELECT $1, id, customer_id, 'stage', $2, $3, $4, $5::jsonb FROM applications WHERE id = $6`,
-        [user.organization_id, user.id, user.name, summary,
-         JSON.stringify({ from: file.stage_key, to: target.key, forced: body.force,
-                          overridden: decision.warnings }), id],
-      );
-
-      await recordAudit(
-        {
-          organizationId: user.organization_id,
-          actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip, sessionId: req.sessionId },
-          action: 'stage.change',
-          entityType: 'application',
-          entityId: id,
-          summary,
-          before: { stage_key: file.stage_key },
-          after: { stage_key: target.key, forced: body.force, overridden: decision.warnings },
-        },
-        client,
-      );
-
-      return { decision, stoppedEnrollments, from, target };
+    const result = await moveFileToStage(actorOf(req), String(req.params.id), req.body, {
+      mayForce: can(req.user!, 'pipeline.configure'), sessionId: req.sessionId,
     });
-
-    if (!result.decision.allowed) {
-      res.status(422).json({
-        ok: false,
-        code: 'stage_blocked',
-        error: result.decision.message,
-        blockers: result.decision.blockers,
-      });
+    if (!result.ok) {
+      res.status(422).json({ ok: false, code: 'stage_blocked', error: result.message, blockers: result.blockers });
       return;
     }
-
-    res.json({
-      ok: true,
-      stage: result.target,
-      stopped_automations: result.stoppedEnrollments,
-      overridden: result.decision.warnings,
-    });
+    res.json(result);
   }),
 );
 
@@ -593,63 +640,8 @@ customerRoutes.post(
   '/applications/:id/assign',
   requirePermission('pipeline.assign'),
   asyncRoute(async (req, res) => {
-    const id = z.string().uuid().parse(req.params.id);
-    const body = z
-      .object({
-        user_id: z.string().uuid(),
-        role: z.enum(['broker', 'underwriter', 'manager', 'compliance', 'assistant']),
-        is_primary: z.boolean().default(true),
-      })
-      .parse(req.body);
-    const user = req.user!;
-
-    const assignee = await queryOne<{ id: string; name: string; active: boolean }>(
-      'SELECT id, name, active FROM users WHERE id = $1 AND organization_id = $2',
-      [body.user_id, user.organization_id],
-    );
-    if (!assignee) throw notFound('That user');
-    if (!assignee.active) throw new AppError('That account is not active.', 422, 'inactive_user');
-
-    await withTransaction(async (client) => {
-      // The existing primary steps down before the new one steps up, or the
-      // partial unique index rejects the write.
-      if (body.is_primary) {
-        await client.query(
-          `UPDATE assignments SET is_primary = false
-            WHERE application_id = $1 AND role = $2 AND unassigned_at IS NULL`,
-          [id, body.role],
-        );
-      }
-      await client.query(
-        `INSERT INTO assignments (application_id, user_id, role, is_primary, assigned_by)
-         VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (application_id, user_id, role)
-         DO UPDATE SET is_primary = EXCLUDED.is_primary, unassigned_at = NULL,
-                       assigned_at = now(), assigned_by = EXCLUDED.assigned_by`,
-        [id, body.user_id, body.role, body.is_primary, user.id],
-      );
-      await client.query(
-        `INSERT INTO notifications (organization_id, user_id, kind, title, body, entity_type, entity_id, link)
-         VALUES ($1,$2,'assignment',$3,$4,'application',$5,$6)`,
-        [user.organization_id, body.user_id,
-         `You were assigned as ${body.role}`,
-         `${user.name} assigned you to a file.`, id, `${env.BASE_PATH}/applications/${id}`],
-      );
-      await recordAudit(
-        {
-          organizationId: user.organization_id,
-          actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip },
-          action: 'assignment.create',
-          entityType: 'application',
-          entityId: id,
-          summary: `${assignee.name} assigned as ${body.role}${body.is_primary ? ' (primary)' : ''}`,
-          after: { user_id: body.user_id, role: body.role, is_primary: body.is_primary },
-        },
-        client,
-      );
-    });
-
-    res.json({ ok: true });
+    const result = await assignLead(actorOf(req), String(req.params.id), req.body);
+    res.json({ ok: true, ...result });
   }),
 );
 
@@ -659,95 +651,101 @@ customerRoutes.post(
   '/customers',
   requirePermission('customer.create'),
   asyncRoute(async (req, res) => {
-    const body = z
-      .object({
-        first_name: z.string().trim().min(1, 'A first name is required.'),
-        last_name: z.string().trim().min(1, 'A last name is required.'),
-        email: z.string().email('That is not a valid email address.').optional().or(z.literal('')),
-        phone: z.string().optional(),
-        lead_source: z.string().optional(),
-        transaction_type_key: z.string().optional(),
-        amount_requested: z.number().nonnegative().optional(),
-      })
-      .parse(req.body);
     const user = req.user!;
-
-    const phone = body.phone ? toE164(body.phone) : null;
-    if (body.phone && !phone) {
-      throw new AppError('That is not a valid Canadian phone number.', 422, 'validation_failed');
-    }
-    if (!body.email && !phone) {
-      throw new AppError('A customer needs at least an email address or a phone number.', 422, 'validation_failed');
-    }
-
-    // Possible duplicates are reported, never merged silently. Merging two
-    // people's mortgage files because they share an address is not recoverable.
-    const duplicates = await query<{ id: string; first_name: string; last_name: string; email: string }>(
-      `SELECT id, first_name, last_name, email FROM customers
-        WHERE organization_id = $1 AND merged_into_id IS NULL
-          AND ((NULLIF($2,'') IS NOT NULL AND lower(email) = lower($2))
-            OR ($3::text IS NOT NULL AND phone_e164 = $3))
-        LIMIT 5`,
-      [user.organization_id, body.email ?? '', phone],
-    );
-
-    const created = await withTransaction(async (client) => {
-      const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO customers (organization_id, first_name, last_name, email, phone_e164,
-                                phone_raw, lead_source, created_by)
-         VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8) RETURNING id`,
-        [user.organization_id, body.first_name, body.last_name, body.email ?? '',
-         phone, body.phone ?? null, body.lead_source ?? 'manual', user.id],
-      );
-      const customerId = rows[0]!.id;
-
-      const firstStage = await client.query<{ key: string }>(
-        `SELECT key FROM pipeline_stages WHERE organization_id = $1 AND active
-          ORDER BY position LIMIT 1`,
-        [user.organization_id],
-      );
-
-      const app = await client.query<{ id: string }>(
-        `INSERT INTO applications (organization_id, customer_id, transaction_type_key,
-                                   amount_requested, stage_key, stage_changed_at, last_activity_at)
-         VALUES ($1,$2,$3,$4,$5,now(),now()) RETURNING id`,
-        [user.organization_id, customerId, body.transaction_type_key ?? null,
-         body.amount_requested ?? null, firstStage.rows[0]?.key ?? null],
-      );
-      const applicationId = app.rows[0]!.id;
-
-      await client.query(
-        `INSERT INTO assignments (application_id, user_id, role, is_primary, assigned_by)
-         VALUES ($1,$2,'broker',true,$2)`,
-        [applicationId, user.id],
-      );
-      await client.query(
-        `INSERT INTO activity (organization_id, application_id, customer_id, kind,
-                               actor_user_id, actor_name, summary)
-         VALUES ($1,$2,$3,'system',$4,$5,$6)`,
-        [user.organization_id, applicationId, customerId, user.id, user.name,
-         `File created by ${user.name}`],
-      );
-      await recordAudit(
-        {
-          organizationId: user.organization_id,
-          actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip },
-          action: 'customer.create',
-          entityType: 'customer',
-          entityId: customerId,
-          summary: `Created ${body.first_name} ${body.last_name}`,
-          after: { email: body.email, phone: phone },
-        },
-        client,
-      );
-      return { customerId, applicationId };
+    // A broker typing in their own referral keeps it; anybody else's default
+    // is the rotation. The form shows the choice either way.
+    const result = await createLead(actorOf(req), req.body, {
+      defaultAssign: user.role === 'broker' ? 'me' : 'auto',
+      mayAssignOthers: can(user, 'pipeline.assign'),
+      source: 'manual',
     });
-
-    res.status(201).json({
-      ok: true,
-      customer_id: created.customerId,
-      application_id: created.applicationId,
-      possible_duplicates: duplicates.rows,
-    });
+    res.status(201).json({ ok: true, ...result });
   }),
 );
+
+// ── The customer record ────────────────────────────────────────────────────
+
+const scopeOf = (req: Parameters<typeof actorOf>[0]): CustomerScope => ({
+  actor: actorOf(req),
+  viewAll: can(req.user!, 'customer.view_all'),
+});
+const UUID = z.string().uuid();
+
+/** Find a record to merge with, by name, email or phone. */
+customerRoutes.get(
+  '/customers/search',
+  requirePermission('customer.view'),
+  asyncRoute(async (req, res) => {
+    const q = z.object({ q: z.string().max(100).default(''), exclude: UUID.optional() }).parse(req.query);
+    res.json({ ok: true, customers: await searchCustomers(scopeOf(req), q.q, q.exclude) });
+  }),
+);
+
+/** The contact record, every file on it, and anybody who looks like the same person. */
+customerRoutes.get(
+  '/customers/:id',
+  requirePermission('customer.view'),
+  asyncRoute(async (req, res) => {
+    const scope = scopeOf(req);
+    const id = UUID.parse(req.params.id);
+    const customer = await loadCustomer(scope, id);
+    const { rows: files } = await query(
+      `SELECT app.id, app.portal_reference, app.stage_key, ps.label AS stage_label,
+              app.transaction_type_key, app.amount_requested, app.created_at, app.archived_at
+         FROM applications app
+         LEFT JOIN pipeline_stages ps ON ps.organization_id = app.organization_id AND ps.key = app.stage_key
+        WHERE app.customer_id = $1
+        ORDER BY app.archived_at NULLS FIRST, app.created_at DESC`,
+      [id],
+    );
+    res.json({ ok: true, customer, files, duplicates: await findDuplicates(scope, id) });
+  }),
+);
+
+customerRoutes.patch(
+  '/customers/:id',
+  requirePermission('customer.edit'),
+  asyncRoute(async (req, res) => {
+    res.json({ ok: true, ...(await updateCustomer(scopeOf(req), UUID.parse(req.params.id), req.body)) });
+  }),
+);
+
+customerRoutes.get(
+  '/customers/:id/duplicates',
+  requirePermission('customer.view'),
+  asyncRoute(async (req, res) => {
+    res.json({ ok: true, duplicates: await findDuplicates(scopeOf(req), UUID.parse(req.params.id)) });
+  }),
+);
+
+/** Fold `merge_id` into this customer. This one survives. */
+customerRoutes.post(
+  '/customers/:id/merge',
+  requirePermission('customer.merge'),
+  asyncRoute(async (req, res) => {
+    const body = z.object({ merge_id: UUID }).parse(req.body);
+    res.json({ ok: true, ...(await mergeCustomers(scopeOf(req), UUID.parse(req.params.id), body.merge_id)) });
+  }),
+);
+
+customerRoutes.post(
+  '/customers/:id/duplicates/:other/dismiss',
+  requirePermission('customer.merge'),
+  asyncRoute(async (req, res) => {
+    await dismissDuplicate(scopeOf(req), UUID.parse(req.params.id), UUID.parse(req.params.other));
+    res.json({ ok: true });
+  }),
+);
+
+// ── Archiving a file ───────────────────────────────────────────────────────
+
+for (const [path, archived] of [['archive', true], ['restore', false]] as const) {
+  customerRoutes.post(
+    `/applications/:id/${path}`,
+    requirePermission('customer.delete'),
+    asyncRoute(async (req, res) => {
+      const body = z.object({ reason: z.string().max(500).optional() }).parse(req.body ?? {});
+      res.json({ ok: true, ...(await setArchived(scopeOf(req), UUID.parse(req.params.id), archived, body.reason)) });
+    }),
+  );
+}

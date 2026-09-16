@@ -1,12 +1,12 @@
 /** Routing, sign-in, and the screens that are not yet their own module. */
-import { useState } from 'preact/hooks';
-import { ApiError, patch, post, put, relativeTime } from './lib/api.ts';
+import { useEffect, useState } from 'preact/hooks';
+import { ApiError, del, patch, post, put, relativeTime, upload } from './lib/api.ts';
 import {
   navigate, toast, useAsync, useRoute, useSession, useToasts,
   type Config, type Session,
 } from './lib/store.ts';
 import { Shell } from './components/shell.tsx';
-import { Badge, Empty, ErrorNote, Field, Icon, ICONS, Skeleton } from './components/ui.tsx';
+import { Badge, Empty, ErrorNote, Field, Icon, ICONS, SearchSelect, Skeleton } from './components/ui.tsx';
 import { DashboardPage } from './pages/dashboard.tsx';
 import { CustomersPage, PipelinePage } from './pages/customers.tsx';
 import { ClientPage } from './pages/client.tsx';
@@ -15,25 +15,41 @@ import { AutomationsPage } from './pages/automations.tsx';
 import { CompliancePage } from './pages/compliance.tsx';
 import { RenewalsPage } from './pages/funding.tsx';
 import { ReportsPage } from './pages/reports.tsx';
-import { CalendarPage } from './pages/calendar.tsx';
+import { AppointmentsPage } from './pages/appointments.tsx';
 import { CampaignsPage } from './pages/campaigns.tsx';
 import { SettingsAdminPage } from './pages/settings-admin.tsx';
 import { DocumentsPage } from './pages/documents.tsx';
 import { MessagesPage } from './pages/messages.tsx';
+import { StaffPage } from './pages/staff.tsx';
+import { ApiAccessPage } from './pages/api-access.tsx';
+import { RequiredDocumentsPage } from './pages/required-documents.tsx';
+import { ActivityPage } from './pages/activity.tsx';
+import { ChatsPage, PhotoPicker } from './pages/chats.tsx';
+import { TasksPage } from './pages/tasks.tsx';
+import { PipelineDetailPage, PipelinesPage } from './pages/pipelines.tsx';
+import { ActivatePage } from './pages/activate.tsx';
+import { SignatureEditor } from './components/signature-editor.tsx';
 
 export function App() {
   const { state, reload, signOut } = useSession();
   const toasts = useToasts();
+  const { path } = useRoute();
+
+  // The activation link is opened by somebody who cannot sign in yet — and,
+  // when an admin tests a link, by somebody already signed in as someone
+  // else. Either way it is its own page, outside the shell.
+  const activating = path === '/activate';
 
   return (
     <>
-      {state.status === 'loading' && (
+      {activating && <ActivatePage onActivated={reload} />}
+      {!activating && state.status === 'loading' && (
         <div class="login-page"><div class="login-card"><Skeleton rows={4} /></div></div>
       )}
-      {state.status === 'anonymous' && <LoginPage onSignedIn={reload} />}
-      {state.status === 'ready' && (
+      {!activating && state.status === 'anonymous' && <LoginPage onSignedIn={reload} />}
+      {!activating && state.status === 'ready' && (
         <Shell session={state.session} config={state.config} onSignOut={signOut}>
-          <Routes session={state.session} config={state.config} onProfileSaved={reload} />
+          <Routes session={state.session} config={state.config} onProfileSaved={reload} onConfigChanged={reload} />
         </Shell>
       )}
 
@@ -48,18 +64,25 @@ export function App() {
   );
 }
 
-function Routes({ session, config, onProfileSaved }: {
-  session: Session; config: Config | null; onProfileSaved: () => void;
+function Routes({ session, config, onProfileSaved, onConfigChanged }: {
+  session: Session; config: Config | null; onProfileSaved: () => void | Promise<void>;
+  onConfigChanged: () => void;
 }) {
   const { path } = useRoute();
+  const mustCompleteProfile = !session.user.profile_complete && path !== '/profile';
 
   // Nothing is sent to a client from an account with no signature, so the
   // profile is the first thing a new user sees — and the only thing, until it
-  // is done.
-  if (!session.user.profile_complete && path !== '/profile') {
-    navigate('/profile', true);
-    return null;
-  }
+  // is done. The address bar is corrected after render: navigating during
+  // render changed the URL before this component was listening for it, so it
+  // never re-rendered and a new user saw an empty page.
+  useEffect(() => {
+    if (mustCompleteProfile) navigate('/profile', true);
+  }, [mustCompleteProfile]);
+  if (mustCompleteProfile) return <ProfilePage session={session} onSaved={onProfileSaved} />;
+
+  const pipeline = path.match(/^\/pipelines\/([0-9a-f-]{36})$/i);
+  if (pipeline) return <PipelineDetailPage id={pipeline[1]!} onConfigChanged={onConfigChanged} />;
 
   const client = path.match(/^\/applications\/([0-9a-f-]{36})$/i);
   if (client) return <ClientPage id={client[1]!} session={session} config={config} />;
@@ -72,14 +95,21 @@ function Routes({ session, config, onProfileSaved }: {
     case '/profile': return <ProfilePage session={session} onSaved={onProfileSaved} />;
     case '/integrations': return <IntegrationsPage session={session} />;
     case '/settings': return <SettingsAdminPage session={session} config={config} />;
+    case '/staff': return <StaffPage session={session} />;
+    case '/api-access': return <ApiAccessPage session={session} />;
+    case '/required-documents': return <RequiredDocumentsPage session={session} />;
+    case '/activity': return <ActivityPage session={session} />;
+    case '/pipelines': return <PipelinesPage session={session} config={config} onConfigChanged={onConfigChanged} />;
     case '/documents': return <DocumentsPage session={session} />;
     case '/messages': return <MessagesPage session={session} />;
+    case '/chats': return <ChatsPage session={session} />;
     case '/automations': return <AutomationsPage session={session} />;
     case '/campaigns': return <CampaignsPage session={session} />;
     case '/renewals': return <RenewalsPage session={session} />;
     case '/compliance': return <CompliancePage session={session} />;
     case '/reports': return <ReportsPage session={session} />;
-    case '/calendar': return <CalendarPage session={session} />;
+    case '/appointments': return <AppointmentsPage session={session} />;
+    case '/calendar': return <Redirect to="/appointments?view=week" />;
     default:
       return (
         <Empty title="No such page"
@@ -145,8 +175,9 @@ function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
 
 // ── Profile ────────────────────────────────────────────────────────────────
 
-function ProfilePage({ session, onSaved }: { session: Session; onSaved: () => void }) {
+function ProfilePage({ session, onSaved }: { session: Session; onSaved: () => void | Promise<void> }) {
   const p = (session.profile ?? {}) as Record<string, string | null>;
+  const photo = p.photo ?? null;
   const [form, setForm] = useState({
     name: session.user.name,
     display_name: p.display_name ?? '',
@@ -171,7 +202,10 @@ function ProfilePage({ session, onSaved }: { session: Session; onSaved: () => vo
     try {
       await put('/auth/profile', form);
       toast('Profile saved', 'ok');
-      onSaved();
+      // The session is reloaded BEFORE moving on: going to the dashboard with
+      // the old session still saying "profile incomplete" bounced straight
+      // back here.
+      await onSaved();
       if (first) navigate('/');
     } catch (err) {
       // Field-level messages where the server gave them, so the person is not
@@ -187,7 +221,7 @@ function ProfilePage({ session, onSaved }: { session: Session; onSaved: () => vo
   };
 
   return (
-    <div class="content-narrow" style={{ maxWidth: 620 }}>
+    <div class="content-narrow" style={{ maxWidth: first ? 620 : 860 }}>
       <div class="page-head">
         <div>
           <h1>{first ? 'Set up your profile' : 'Your profile'}</h1>
@@ -202,6 +236,23 @@ function ProfilePage({ session, onSaved }: { session: Session; onSaved: () => vo
       <form class="card" onSubmit={submit}>
         <div class="card-body">
           {errors._ && <div class="alert alert-error">{errors._}</div>}
+          <Field label="Your picture"
+                 hint="Shown beside your name in LM Chats. Without one, your initials are.">
+            <PhotoPicker
+              name={session.user.name} src={photo}
+              onUpload={async (file) => {
+                const form = new FormData();
+                form.set('photo', file);
+                await upload('/users/me/photo', form, undefined, 'PUT');
+                toast('Picture updated.', 'ok');
+                await onSaved();
+              }}
+              onRemove={async () => {
+                await del('/users/me/photo');
+                toast('Picture removed.', 'ok');
+                await onSaved();
+              }} />
+          </Field>
           <div class="grid-2">
             <Field label="Full name" error={errors.name}>
               <input value={form.name} onInput={set('name')} required />
@@ -218,11 +269,10 @@ function ProfilePage({ session, onSaved }: { session: Session; onSaved: () => vo
               <input value={form.licence_number} onInput={set('licence_number')} />
             </Field>
             <Field label="Licence province">
-              <select value={form.licence_province} onChange={set('licence_province')}>
-                {['AB','BC','MB','NB','NL','NS','NT','NU','ON','PE','QC','SK','YT'].map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
+              <SearchSelect value={form.licence_province} ariaLabel="Licence province"
+                            options={['AB','BC','MB','NB','NL','NS','NT','NU','ON','PE','QC','SK','YT']
+                              .map((p) => ({ value: p, label: p }))}
+                            onChange={(v) => setForm((f) => ({ ...f, licence_province: v }))} />
             </Field>
           </div>
           <div class="grid-2">
@@ -246,69 +296,31 @@ function ProfilePage({ session, onSaved }: { session: Session; onSaved: () => vo
           </button>
         </div>
       </form>
-    </div>
-  );
-}
 
-// ── Tasks ──────────────────────────────────────────────────────────────────
-
-function TasksPage({ session }: { session: Session }) {
-  const [due, setDue] = useState('all');
-  const state = useAsync<{ tasks: Array<Record<string, any>> }>(`/tasks?due=${due}&status=active`, [due]);
-
-  const complete = async (id: string) => {
-    try {
-      await patch(`/tasks/${id}`, { status: 'completed' });
-      toast('Task completed', 'ok');
-      state.reload();
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Could not complete that task.', 'error');
-    }
-  };
-
-  return (
-    <div class="content-narrow">
-      <div class="page-head">
-        <div><h1>Tasks</h1><p>Your open work, soonest first.</p></div>
-        <div class="row" role="group" aria-label="Filter">
-          {[['all', 'All'], ['overdue', 'Overdue'], ['today', 'Today'], ['week', 'This week']].map(([k, l]) => (
-            <button key={k} class={`btn btn-sm${due === k ? ' btn-primary' : ''}`}
-                    onClick={() => setDue(k!)}>{l}</button>
-          ))}
-        </div>
-      </div>
-
-      <div class="card">
-        {state.status === 'loading' && <Skeleton rows={4} />}
-        {state.status === 'error' && <div style={{ padding: 15 }}><ErrorNote error={state.error} code={state.code} permission={state.permission}
-                     onRetry={state.reload} /></div>}
-        {state.status === 'ready' && state.data.tasks.length === 0 && (
-          <Empty title="Nothing open">Tasks assigned to you appear here.</Empty>
-        )}
-        {state.status === 'ready' && state.data.tasks.map((t) => (
-          <div key={t.id} class="row" style={{ padding: '11px 15px', borderBottom: '1px solid var(--border)' }}>
-            <input type="checkbox" style={{ width: 16, flex: '0 0 auto' }}
-                   aria-label={`Complete ${t.title}`} onChange={() => complete(t.id)} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div class="cell-strong">{t.title}</div>
-              <div class="text-sm text-muted">
-                {t.client_name ? `${t.client_name} · ` : ''}
-                {String(t.category).replace(/_/g, ' ')}
-                {t.due_on ? ` · due ${relativeTime(t.due_on)}` : ''}
-              </div>
+      {first ? (
+        <p class="text-sm text-muted" style={{ marginTop: 12 }}>
+          Your email signature is built from these details. Once you have saved them you can change how
+          it looks under <strong>Your profile</strong>.
+        </p>
+      ) : (
+        <div class="card" style={{ marginTop: 16 }} id="signature">
+          <div class="card-head">
+            <div>
+              <h2>Email signature</h2>
+              <p class="text-sm text-muted mb-0">Added to the bottom of the emails you send from the CRM.</p>
             </div>
-            {t.overdue && <Badge tone="danger">Overdue</Badge>}
-            {t.application_id && (
-              <button class="btn btn-ghost btn-sm"
-                      onClick={() => navigate(`/applications/${t.application_id}`)}>Open file</button>
-            )}
           </div>
-        ))}
-      </div>
+          <div class="card-body"><SignatureEditor path="/auth/signature" /></div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── Integrations and settings ──────────────────────────────────────────────
 
-
+/** An old address that has moved. Navigating while rendering is what blanked the page once; after is safe. */
+function Redirect({ to }: { to: string }) {
+  useEffect(() => { navigate(to, true); }, [to]);
+  return null;
+}

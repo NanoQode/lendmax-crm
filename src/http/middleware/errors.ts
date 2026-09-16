@@ -35,6 +35,15 @@ export class AppError extends Error {
 }
 
 export const notFound = (what: string) => new AppError(`${what} not found.`, 404, 'not_found');
+
+/**
+ * A server-side check reported against the field it is about, in the same
+ * shape as schema validation, so a form can put the message under the right
+ * input instead of in a banner above nine of them.
+ */
+export function fieldError(field: string, message: string): ZodError {
+  return new ZodError([{ code: 'custom', path: [field], message }]);
+}
 export const conflict = (message: string, detail?: unknown) =>
   new AppError(message, 409, 'conflict', detail);
 

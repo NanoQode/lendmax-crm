@@ -9,7 +9,9 @@ set -euo pipefail
 CONF=/etc/nginx/sites-available/lendmax.ca
 BACKUP="/root/nginx-lendmax.ca.$(date +%Y%m%d-%H%M%S).bak"
 
-grep -q "location /crm" "$CONF" && { echo "already routed; nothing to do"; exit 0; }
+if grep -q "location /crm/api/events" "$CONF"; then
+  echo "already routed, event stream included; nothing to do"; exit 0
+fi
 curl -fsS http://127.0.0.1:3400/crm/api/health >/dev/null \
   || { echo "the CRM is not answering on 3400 — start it first"; exit 1; }
 
@@ -31,6 +33,27 @@ block = '''
     # internet — the portal reaches it over localhost, bypassing nginx.
     location /crm/api/internal/ { return 404; }
 
+    # LM Chats' event stream. It is one long-lived response per open tab, so
+    # it needs the two things the block below deliberately does not give the
+    # rest of the app: no response buffering, and a read timeout longer than a
+    # quiet afternoon.
+    #
+    # Strictly this is belt and braces — the service sends
+    # `X-Accel-Buffering: no` on the stream and a heartbeat every 25 seconds,
+    # so chat works through the plain /crm block too. This makes it explicit
+    # rather than dependent on a header being noticed.
+    location /crm/api/events {
+        proxy_pass http://127.0.0.1:3400;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+
     location /crm {
         proxy_pass http://127.0.0.1:3400;
         proxy_http_version 1.1;
@@ -47,12 +70,21 @@ block = '''
 # Insert before the catch-all location / inside the 443 server block. The
 # newline in the marker must be a real one: written as "\\n" in a quoted
 # heredoc it becomes a literal backslash-n and can never match.
-marker = "    location / {\n        proxy_pass http://127.0.0.1:3000;"
-if marker not in conf:
-    sys.exit("could not find the catch-all location; not modifying")
-conf = conf.replace(marker, block + marker, 1)
+# Two cases. A machine that has never had the CRM gets the whole block; one
+# that was set up before LM Chats already has `location /crm` and needs only
+# the event-stream location added in front of it.
+if "location /crm {" in conf:
+    marker = "    location /crm {"
+    events = block.split("    location /crm {")[0].split("return 404; }")[1]
+    conf = conf.replace(marker, events.strip("\n") + "\n\n" + marker, 1)
+    print("event-stream location added to the existing block")
+else:
+    marker = "    location / {\n        proxy_pass http://127.0.0.1:3000;"
+    if marker not in conf:
+        sys.exit("could not find the catch-all location; not modifying")
+    conf = conf.replace(marker, block + marker, 1)
+    print("block inserted")
 open(path, 'w').write(conf)
-print("block inserted")
 PYEOF
 
 # `nginx -t | tail` would report tail's exit status, which is always 0, so a

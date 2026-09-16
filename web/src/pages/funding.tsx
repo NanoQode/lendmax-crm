@@ -30,8 +30,15 @@ type Commission = {
   variance_description: { amount: number | null; label: string; tone: string };
 };
 
+type SplitPolicy = {
+  staff_percent: number; brokerage_percent: number;
+  effective_from: string | null; updated_by_name: string | null; is_default: boolean;
+};
+
 type Payload = {
   funding: Funding;
+  split_policy: SplitPolicy | null;
+  file_staff: { user_id: string; name: string } | null;
   submissions: Array<Record<string, any>>;
   lenders: Array<{ id: string; name: string; short_name: string | null; default_bps: string | null }>;
   commissions: Commission[];
@@ -134,6 +141,10 @@ export function FundingTab({ applicationId, session, config }: {
         </div>
       </div>
 
+      {d.split_policy && (
+        <StaffShareCard policy={d.split_policy} staff={d.file_staff} commissions={d.commissions} />
+      )}
+
       {d.commission_hidden ? (
         <div class="card"><div class="card-body">
           <p class="text-muted">
@@ -161,6 +172,7 @@ export function FundingTab({ applicationId, session, config }: {
       )}
       {confirming && f && (
         <ConfirmFunding applicationId={applicationId} funding={f} config={config}
+                        policy={d.split_policy} staff={d.file_staff}
                         onClose={() => setConfirming(false)}
                         onConfirmed={() => { setConfirming(false); state.reload(); }} />
       )}
@@ -169,6 +181,55 @@ export function FundingTab({ applicationId, session, config }: {
                        onClose={() => setReconciling(null)}
                        onSaved={() => { setReconciling(null); state.reload(); }} />
       )}
+    </div>
+  );
+}
+
+/**
+ * What the staff member on this file makes, and what the brokerage keeps.
+ *
+ * Before a commission is confirmed this is the brokerage's split as it stands;
+ * once one is, it is what was actually recorded on it — the policy changing
+ * later does not rewrite a commission already divided.
+ */
+function StaffShareCard({ policy, staff, commissions }: {
+  policy: SplitPolicy; staff: Payload['file_staff']; commissions: Commission[];
+}) {
+  const recorded = commissions[0];
+  const staffSplit = recorded?.splits.find((x) => x.party === 'broker');
+  const houseSplit = recorded?.splits.find((x) => x.party === 'brokerage');
+  const staffPercent = staffSplit?.percent ?? (recorded ? null : policy.staff_percent);
+  const housePercent = houseSplit?.percent ?? (recorded ? null : policy.brokerage_percent);
+
+  return (
+    <div class="card">
+      <div class="card-head">
+        <h2>Staff share</h2>
+        <Badge tone="neutral">Admin only</Badge>
+      </div>
+      <div class="card-body">
+        <div class="staff-share">
+          <div>
+            <div class="label">{staffSplit?.party_name ?? staff?.name ?? 'No broker assigned'}</div>
+            <div class="staff-share-value">{staffPercent === null ? '—' : `${Number(staffPercent)}%`}</div>
+            {staffSplit?.amount && <div class="num text-sm">{money(staffSplit.amount)}</div>}
+          </div>
+          <div>
+            <div class="label">Lendmax</div>
+            <div class="staff-share-value">{housePercent === null ? '—' : `${Number(housePercent)}%`}</div>
+            {houseSplit?.amount && <div class="num text-sm">{money(houseSplit.amount)}</div>}
+          </div>
+        </div>
+        <div class="staff-share-bar" aria-hidden="true">
+          <span style={{ width: `${Number(staffPercent ?? policy.staff_percent)}%` }} />
+        </div>
+        <p class="text-sm text-muted mb-0">
+          {recorded
+            ? 'As recorded on the confirmed commission.'
+            : <>The brokerage split{policy.is_default ? ' (the starting 50/50)' : ''}. It is applied when the funding is confirmed.
+                {' '}<button class="link-button" onClick={() => navigate('/settings?section=funding')}>Change it in Settings</button></>}
+        </p>
+      </div>
     </div>
   );
 }
@@ -456,8 +517,9 @@ function FundingForm({ applicationId, existing, lenders, onClose, onSaved }: {
  * The arithmetic is shown as it is typed, and the confirmation says what it
  * is about to cause before it causes it.
  */
-function ConfirmFunding({ applicationId, funding, config, onClose, onConfirmed }: {
+function ConfirmFunding({ applicationId, funding, config, policy, staff, onClose, onConfirmed }: {
   applicationId: string; funding: Record<string, any>; config: Config | null;
+  policy: SplitPolicy | null; staff: Payload['file_staff'];
   onClose: () => void; onConfirmed: () => void;
 }) {
   // The user list is already on the config the app loads once; fetching it
@@ -467,7 +529,11 @@ function ConfirmFunding({ applicationId, funding, config, onClose, onConfirmed }
   const [expectedOn, setExpectedOn] = useState('');
   const [splits, setSplits] = useState<Array<{
     party: string; user_id?: string; party_name?: string; percent?: string; amount?: string;
-  }>>([{ party: 'broker', percent: '70' }, { party: 'brokerage', percent: '30' }]);
+  }>>([
+    // Starts from the brokerage's split, with the file's broker already chosen.
+    { party: 'broker', user_id: staff?.user_id, percent: String(policy?.staff_percent ?? 50) },
+    { party: 'brokerage', percent: String(policy?.brokerage_percent ?? 50) },
+  ]);
   const [error, setError] = useState('');
   const [detail, setDetail] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);

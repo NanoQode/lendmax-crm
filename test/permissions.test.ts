@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  can, canAll, canAny, denialMessage, permissionsFor,
+  API_PERMISSIONS, can, canAll, canAny, denialMessage, MODULES, overridesFor, permissionsFor,
   PERMISSION_IDS, ROLES, ROLE_IDS, type Role,
 } from '../src/domain/permissions.ts';
 
@@ -36,6 +36,11 @@ test('the technical admin runs the system without reading the clients', () => {
   assert.equal(can(admin, 'pii.view_sensitive'), false);
   assert.equal(can(admin, 'pii.view_financials'), false);
   assert.equal(can(admin, 'compliance.review'), false);
+
+  // Writes that read nothing sensitive: correcting a file, asking for documents.
+  assert.equal(can(admin, 'customer.edit'), true);
+  assert.equal(can(admin, 'document.request'), true);
+  assert.equal(can(admin, 'scarlett.push'), true);
 });
 
 test('only the compliance manager may approve a compliance file or hold it', () => {
@@ -113,5 +118,53 @@ test('a refusal names the role and the capability', () => {
   const msg = denialMessage(as('broker'), 'compliance.review');
   assert.match(msg, /Broker/);
   assert.match(msg, /approve or reject a compliance file/i);
-  assert.match(msg, /Settings/, 'and says where to get it fixed');
+  assert.match(msg, /Staff/, 'and says where to get it fixed');
+});
+
+// ── The module registry ───────────────────────────────────────────────────
+
+test('every permission belongs to exactly one module, so none is missing from the staff form', () => {
+  const seen = new Map<string, string>();
+  for (const module of MODULES) {
+    for (const p of module.permissions) {
+      assert.ok(PERMISSION_IDS.includes(p.id), `${module.key} lists unknown permission ${p.id}`);
+      assert.ok(!seen.has(p.id), `${p.id} is in both ${seen.get(p.id)} and ${module.key}`);
+      seen.set(p.id, module.key);
+    }
+  }
+  const missing = PERMISSION_IDS.filter((id) => !seen.has(id));
+  assert.deepEqual(missing, [], 'add these to a module in MODULES');
+});
+
+test('module keys are unique and every module has something to tick', () => {
+  const keys = MODULES.map((m) => m.key);
+  assert.equal(new Set(keys).size, keys.length);
+  for (const m of MODULES) assert.ok(m.permissions.length > 0, `${m.key} is empty`);
+});
+
+test('an API key can only be given permissions that have an endpoint', () => {
+  assert.ok(API_PERMISSIONS.includes('customer.create'), 'leads from a website');
+  assert.ok(API_PERMISSIONS.includes('user.view'));
+  assert.equal(API_PERMISSIONS.includes('system.admin'), false);
+  assert.equal(API_PERMISSIONS.includes('user.impersonate'), false);
+});
+
+test('overrides store only the difference from the role', () => {
+  const broker = ROLES.broker.permissions;
+  assert.deepEqual(overridesFor('broker', broker), {}, 'exactly the role: nothing stored');
+
+  const plus = overridesFor('broker', [...broker, 'report.view_team']);
+  assert.deepEqual(plus, { 'report.view_team': true });
+
+  const minus = overridesFor('broker', broker.filter((p) => p !== 'message.send'));
+  assert.deepEqual(minus, { 'message.send': false });
+
+  // What is stored reproduces exactly what was ticked.
+  const ticked = [...broker.filter((p) => p !== 'message.send'), 'report.view_team'];
+  const effective = permissionsFor({ role: 'broker', permission_overrides: overridesFor('broker', ticked) });
+  assert.deepEqual([...effective].sort(), [...ticked].sort());
+});
+
+test('an unknown permission in a ticked set is dropped rather than stored', () => {
+  assert.deepEqual(overridesFor('broker', [...ROLES.broker.permissions, 'made.up']), {});
 });

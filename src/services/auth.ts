@@ -166,7 +166,7 @@ export type SignInResult =
   | { ok: true; user: SessionUser }
   | {
       ok: false;
-      reason: 'invalid' | 'locked' | 'inactive';
+      reason: 'invalid' | 'locked' | 'inactive' | 'not_activated';
       message: string;
       retryAfterMinutes?: number;
     };
@@ -177,11 +177,13 @@ export async function signIn(email: string, password: string): Promise<SignInRes
       password_hash: string | null;
       locked_until: Date | null;
       failed_login_count: number;
+      activated_at: Date | null;
     }
   >(
     `SELECT id, organization_id, email, name, role, permission_overrides, active,
-            profile_complete, timezone, password_hash, locked_until, failed_login_count
-       FROM users WHERE lower(email) = lower($1)`,
+            profile_complete, timezone, password_hash, locked_until, failed_login_count,
+            activated_at
+       FROM users WHERE lower(email) = lower($1) AND archived_at IS NULL`,
     [email],
   );
 
@@ -213,6 +215,17 @@ export async function signIn(email: string, password: string): Promise<SignInRes
       message: 'That account is not active. Ask a technical admin.',
     };
   }
+  // Only a person who has proved they hold the mailbox — by using the link
+  // sent to it — can sign in. An admin cannot create a working login for
+  // somebody else's address.
+  if (!user.activated_at) {
+    await verifyPassword(password, null);
+    return {
+      ok: false,
+      reason: 'not_activated',
+      message: 'This account has not been activated yet. Use the link in your invitation email, or ask an admin to send a new one.',
+    };
+  }
 
   const ok = await verifyPassword(password, user.password_hash);
   if (!ok) {
@@ -234,7 +247,7 @@ export async function signIn(email: string, password: string): Promise<SignInRes
       WHERE id = $1`,
     [user.id],
   );
-  const { password_hash, locked_until, failed_login_count, ...clean } = user;
+  const { password_hash, locked_until, failed_login_count, activated_at, ...clean } = user;
   return { ok: true, user: clean as SessionUser };
 }
 

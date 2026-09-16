@@ -18,6 +18,7 @@ let orgId: string;
 let brokerId: string;
 let underwriterId: string;
 let managerId: string;
+let adminId: string;
 let applicationId: string;
 let cookies: Record<string, string> = {};
 const app = createApp();
@@ -61,6 +62,21 @@ beforeEach(async () => {
      VALUES ($1,'manager@example.com','Sam Manager','manager',true,true) RETURNING id`, [orgId])
   ).rows[0]!.id;
 
+  adminId = (await query<{ id: string }>(
+    `INSERT INTO users (organization_id, email, name, role, active, profile_complete)
+     VALUES ($1,'admin@example.com','Alex Admin','technical_admin',true,true) RETURNING id`, [orgId])
+  ).rows[0]!.id;
+  // Funding and commission are the admin's by default. These three are the
+  // grants an admin makes under Staff, so the rules below are exercised by the
+  // people they were written about.
+  await query(`UPDATE users SET permission_overrides = $2 WHERE id = $1`,
+    [underwriterId, { 'funding.view': true, 'funding.edit': true }]);
+  await query(`UPDATE users SET permission_overrides = $2 WHERE id = $1`,
+    [managerId, { 'funding.view': true, 'funding.edit': true, 'commission.view': true,
+                  'commission.edit': true, 'commission.view_all': true }]);
+  await query(`UPDATE users SET permission_overrides = $2 WHERE id = $1`,
+    [brokerId, { 'commission.view': true }]);
+
   await query(
     `INSERT INTO pipeline_stages (organization_id, key, label, position, category, active)
      VALUES ($1,'application','Application',10,'open',true),
@@ -85,11 +101,12 @@ beforeEach(async () => {
     broker: `lmx_crm_session=${(await createSession(brokerId, {})).token}`,
     underwriter: `lmx_crm_session=${(await createSession(underwriterId, {})).token}`,
     manager: `lmx_crm_session=${(await createSession(managerId, {})).token}`,
+    admin: `lmx_crm_session=${(await createSession(adminId, {})).token}`,
   };
 });
 
 async function call(
-  who: 'broker' | 'underwriter' | 'manager', method: string, path: string, body?: unknown,
+  who: 'broker' | 'underwriter' | 'manager' | 'admin', method: string, path: string, body?: unknown,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await fetch(`${base}${path}`, {
     method,
@@ -230,7 +247,7 @@ test('a confirmed funding is not something a broker quietly edits', async () => 
   const broker = await call('underwriter', 'PUT', `/applications/${applicationId}/funding`,
     { funded_amount: '600000' });
   assert.equal(broker.status, 403);
-  assert.match(String(broker.body.error), /A manager can amend it/);
+  assert.match(String(broker.body.error), /An admin can amend it/);
 
   const manager = await call('manager', 'PUT', `/applications/${applicationId}/funding`,
     { approved_amount: '620000', funded_amount: '600000' });
@@ -276,7 +293,7 @@ test('a broker sees the commission they are paid on, and is told so', async () =
   const mine = await call('broker', 'GET', '/commissions?status=all');
   assert.equal((mine.body.commissions as unknown[]).length, 1);
   assert.equal(mine.body.scope, 'mine');
-  assert.match(String(mine.body.scope_reason), /A manager sees the brokerage/);
+  assert.match(String(mine.body.scope_reason), /An admin sees the brokerage/);
 
   const all = await call('manager', 'GET', '/commissions?status=all');
   assert.equal(all.body.scope, 'all');
@@ -343,4 +360,52 @@ test('splits that allocate more than the commission stop the confirmation', asyn
   const funding = await queryOne<{ confirmed: boolean }>(
     'SELECT confirmed FROM funding_records WHERE application_id = $1', [applicationId]);
   assert.equal(funding!.confirmed, false);
+});
+
+test('funding and the staff share are the admin\'s alone unless granted', async () => {
+  await query(`UPDATE users SET permission_overrides = '{}'::jsonb WHERE id <> $1`, [adminId]);
+  for (const who of ['broker', 'underwriter', 'manager'] as const) {
+    assert.equal((await call(who, 'GET', `/applications/${applicationId}/funding`)).status, 403,
+      `${who} does not see the Funding tab`);
+    assert.equal((await call(who, 'GET', '/admin/commission-split')).status, 403,
+      `${who} does not see the percentage`);
+  }
+
+  const seen = await call('admin', 'GET', `/applications/${applicationId}/funding`);
+  assert.equal(seen.status, 200);
+  const policy = seen.body.split_policy as Record<string, unknown>;
+  assert.equal(policy.staff_percent, 50, 'it starts at 50/50');
+  assert.equal(policy.brokerage_percent, 50);
+  assert.equal(policy.is_default, true);
+  assert.deepEqual(seen.body.file_staff, { user_id: brokerId, name: 'Dana Broker' });
+});
+
+test('the admin changes the split, it is audited, and a confirmed commission keeps its own', async () => {
+  await call('admin', 'PUT', `/applications/${applicationId}/funding`, goodFunding);
+  const first = await call('admin', 'POST', `/applications/${applicationId}/funding/confirm`, {
+    commission_bps: 100,
+    splits: [{ party: 'broker', user_id: brokerId, percent: 50 }, { party: 'brokerage', percent: 50 }],
+  });
+  assert.equal(first.status, 200);
+
+  assert.equal((await call('broker', 'PUT', '/admin/commission-split', { staff_percent: 90 })).status, 403);
+  assert.equal((await call('admin', 'PUT', '/admin/commission-split', { staff_percent: 101 })).status, 422);
+  const changed = await call('admin', 'PUT', '/admin/commission-split', { staff_percent: 60 });
+  assert.equal(changed.status, 200);
+  assert.equal((changed.body.split as Record<string, unknown>).brokerage_percent, 40);
+
+  const read = await call('admin', 'GET', '/admin/commission-split');
+  assert.equal((read.body.split as Record<string, unknown>).staff_percent, 60);
+  assert.equal((read.body.split as Record<string, unknown>).is_default, false);
+
+  const audit = await queryOne<{ summary: string }>(
+    `SELECT summary FROM audit_log WHERE action = 'settings.commission_split'`);
+  assert.match(audit!.summary, /50\/50 to 60\/40/);
+
+  const splits = await query<{ party: string; percent: string }>(
+    `SELECT s.party, s.percent FROM commission_splits s
+       JOIN commission_records c ON c.id = s.commission_record_id
+      WHERE c.application_id = $1 ORDER BY s.party`, [applicationId]);
+  assert.deepEqual(splits.rows.map((r) => [r.party, Number(r.percent)]), [['broker', 50], ['brokerage', 50]],
+    'changing the policy does not rewrite a commission already divided');
 });

@@ -75,8 +75,8 @@ test('a send with nothing to send, and a subject-less email, are errors', () => 
     ],
   });
   const messages = validateDefinition(empty).filter((i) => i.level === 'error').map((i) => i.message);
-  assert.ok(messages.some((m) => m.includes('"a" has nothing to send')));
-  assert.ok(messages.some((m) => m.includes('"b" has nothing to send')));
+  assert.ok(messages.some((m) => m.includes('The "Send email" step has nothing to send')));
+  assert.ok(messages.some((m) => m.includes('The "Send SMS" step has nothing to send')));
 });
 
 test('no stop conditions is a warning that says what it costs', () => {

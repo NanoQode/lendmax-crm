@@ -40,16 +40,16 @@ beforeEach(async () => {
   ).rows[0]!.id;
 
   adminId = (await query<{ id: string }>(
-    `INSERT INTO users (organization_id, email, name, role, active, profile_complete)
-     VALUES ($1,'admin@example.com','Alex Admin','technical_admin',true,true) RETURNING id`,
+    `INSERT INTO users (organization_id, email, name, role, active, profile_complete, activated_at)
+     VALUES ($1,'admin@example.com','Alex Admin','technical_admin',true,true,now()) RETURNING id`,
     [orgId])).rows[0]!.id;
   secondAdminId = (await query<{ id: string }>(
-    `INSERT INTO users (organization_id, email, name, role, active, profile_complete)
-     VALUES ($1,'admin2@example.com','Blair Admin','technical_admin',true,true) RETURNING id`,
+    `INSERT INTO users (organization_id, email, name, role, active, profile_complete, activated_at)
+     VALUES ($1,'admin2@example.com','Blair Admin','technical_admin',true,true,now()) RETURNING id`,
     [orgId])).rows[0]!.id;
   brokerId = (await query<{ id: string }>(
-    `INSERT INTO users (organization_id, email, name, role, active, profile_complete)
-     VALUES ($1,'broker@example.com','Dana Broker','broker',true,true) RETURNING id`,
+    `INSERT INTO users (organization_id, email, name, role, active, profile_complete, activated_at)
+     VALUES ($1,'broker@example.com','Dana Broker','broker',true,true,now()) RETURNING id`,
     [orgId])).rows[0]!.id;
 
   await query(
@@ -88,14 +88,18 @@ const STAGES = [
 
 test('a pipeline with nothing to fund into is refused', async () => {
   // The failure it prevents shows up weeks later at the first funding, by
-  // which time nobody connects it to a settings change.
-  const result = await call('admin', 'PUT', '/admin/vocabularies/stages',
-    { items: STAGES.filter((s) => s.category !== 'won') });
-  assert.equal(result.status, 400);
-  assert.match(String(result.body.error), /has to be the one that means funded/);
+  // which time nobody connects it to a settings change. Stages are managed
+  // per pipeline now; the rule is the same.
+  const funded = await queryOne<{ id: string }>(`SELECT id FROM pipeline_stages WHERE key = 'funded'`);
+  const result = await call('admin', 'PATCH', `/pipeline-stages/${funded!.id}`, { active: false });
+  assert.equal(result.status, 409);
+  assert.match(String(result.body.error), /needs at least one active “Won” stage/);
 
   const stages = await query(`SELECT 1 FROM pipeline_stages WHERE category = 'won' AND active`);
   assert.equal(stages.rows.length, 1, 'and nothing was changed');
+
+  const old = await call('admin', 'PUT', '/admin/vocabularies/stages', { items: STAGES });
+  assert.equal(old.status, 410, 'the old list editor points at Pipelines instead');
 });
 
 test('an entry left off the list is deactivated, never deleted', async () => {
@@ -132,8 +136,9 @@ test('the usage count tells an admin what a change would affect', async () => {
       `INSERT INTO applications (organization_id, customer_id, property_province, stage_key)
        VALUES ($1,$2,'ON','lead')`, [orgId, customer!.id]);
   }
-  const result = await call('admin', 'GET', '/admin/vocabularies/stages');
-  assert.equal((result.body.usage as Record<string, number>).lead, 3);
+  const lead = await queryOne<{ id: string }>(`SELECT id FROM pipeline_stages WHERE key = 'lead'`);
+  const result = await call('admin', 'GET', `/pipeline-stages/${lead!.id}/usage`);
+  assert.equal(result.body.files, 3);
 });
 
 test('two entries sharing a key are refused before anything is written', async () => {
@@ -155,68 +160,84 @@ test('a broker cannot change the brokerage’s settings', async () => {
   assert.equal(result.status, 403);
 });
 
-// ── Users ──────────────────────────────────────────────────────────────────
+// ── Staff ──────────────────────────────────────────────────────────────────
+// The staff module has its own tests (staff.test.ts); these are the guards
+// that keep a brokerage from locking itself out, exercised over HTTP.
 
-test('the last technical admin cannot be deactivated or demoted', async () => {
-  await query(`UPDATE users SET active = false WHERE id = $1`, [secondAdminId]);
-
-  const deactivate = await call('admin', 'PUT', `/admin/users/${adminId}`, { active: false });
-  assert.equal(deactivate.status, 400);
+test('nobody can deactivate or change the role of their own account', async () => {
+  const deactivate = await call('admin', 'POST', `/staff/${adminId}/deactivate`, {});
+  assert.equal(deactivate.status, 409);
   assert.match(String(deactivate.body.error), /cannot deactivate your own account/);
 
-  // And not by another administrator either, once they are the only one.
-  await query(`UPDATE users SET active = true, role = 'technical_admin' WHERE id = $1`,
-    [secondAdminId]);
-  await query(`UPDATE users SET role = 'manager' WHERE id = $1`, [adminId]);
-  cookies.admin = `lmx_crm_session=${(await createSession(secondAdminId, {})).token}`;
-  await query(`UPDATE users SET role = 'technical_admin' WHERE id = $1`, [adminId]);
-  await query(`UPDATE users SET active = false WHERE id = $1`, [secondAdminId]);
+  const remove = await call('admin', 'DELETE', `/staff/${adminId}`, {});
+  assert.equal(remove.status, 409);
 
-  cookies.admin = `lmx_crm_session=${(await createSession(adminId, {})).token}`;
-  const demote = await call('admin', 'PUT', `/admin/users/${brokerId}`, { role: 'broker' });
-  assert.equal(demote.status, 200, 'an ordinary change still works');
+  const demote = await call('admin', 'PATCH', `/staff/${adminId}`, { role: 'manager' });
+  assert.equal(demote.status, 409);
+  assert.match(String(demote.body.error), /cannot change your own role/);
 });
 
-test('a lone technical admin cannot be demoted by another admin', async () => {
-  // Two admins: demoting one is fine. Demoting the second is not.
-  const first = await call('admin', 'PUT', `/admin/users/${secondAdminId}`,
-    { role: 'manager' });
-  assert.equal(first.status, 200);
+test('the last active technical admin cannot be deactivated, deleted or demoted', async () => {
+  // Alex becomes a manager who has been given staff management, so the only
+  // technical admin left is Blair — and Alex is the one trying to remove them.
+  await query(
+    `UPDATE users SET role = 'manager', permission_overrides = '{"user.manage": true}'::jsonb
+      WHERE id = $1`, [adminId]);
 
-  const second = await call('admin', 'PUT', `/admin/users/${adminId}`, { role: 'manager' });
-  assert.equal(second.status, 400);
-  assert.match(String(second.body.error), /cannot change your own role/);
+  for (const [method, path, body] of [
+    ['POST', `/staff/${secondAdminId}/deactivate`, {}],
+    ['DELETE', `/staff/${secondAdminId}`, {}],
+    ['PATCH', `/staff/${secondAdminId}`, { role: 'manager' }],
+  ] as const) {
+    const result = await call('admin', method, path, body);
+    assert.equal(result.status, 409, `${method} ${path}`);
+    assert.equal(result.body.code, 'last_admin');
+  }
+  const blair = await queryOne<{ active: boolean; role: string }>(
+    'SELECT active, role FROM users WHERE id = $1', [secondAdminId]);
+  assert.deepEqual(blair, { active: true, role: 'technical_admin' }, 'and nothing changed');
+
+  const ordinary = await call('admin', 'PATCH', `/staff/${brokerId}`, { title: 'Senior Agent' });
+  assert.equal(ordinary.status, 200, 'an ordinary change still works');
 });
 
 test('deactivating somebody signs them out everywhere', async () => {
   const session = await createSession(brokerId, {});
-  const before = await queryOne<{ revoked_at: string | null }>(
-    'SELECT revoked_at FROM sessions WHERE user_id = $1 ORDER BY issued_at DESC LIMIT 1',
-    [brokerId]);
-  assert.equal(before!.revoked_at, null);
-
-  await call('admin', 'PUT', `/admin/users/${brokerId}`, { active: false });
+  const result = await call('admin', 'POST', `/staff/${brokerId}/deactivate`, {});
+  assert.equal(result.status, 200);
 
   const after = await query<{ revoked_at: string | null }>(
     'SELECT revoked_at FROM sessions WHERE user_id = $1', [brokerId]);
   assert.ok(after.rows.every((r) => r.revoked_at), `session ${session.sessionId} revoked`);
+
+  const me = await call('broker', 'GET', '/auth/me');
+  assert.equal(me.status, 401, 'their open browser is signed out on its next request');
 });
 
-test('a permission exception has to say why', async () => {
-  const without = await call('admin', 'PUT', `/admin/users/${brokerId}`,
-    { permission_overrides: { 'document.download': true } });
-  assert.equal(without.status, 400);
-  assert.match(String(without.body.error), /Say why this account needs an exception/);
+test('a permission change is audited with exactly what changed', async () => {
+  const broker = (await call('admin', 'GET', `/staff/${brokerId}`)).body.staff as { permissions: string[] };
+  const ticked = [...broker.permissions.filter((p) => p !== 'message.send'), 'document.review'];
 
-  const with_reason = await call('admin', 'PUT', `/admin/users/${brokerId}`, {
-    permission_overrides: { 'document.download': true },
-    override_reason: 'Covering for the underwriter while they are on leave until 30 October.',
+  const result = await call('admin', 'PATCH', `/staff/${brokerId}`, { permissions: ticked });
+  assert.equal(result.status, 200);
+
+  const stored = await queryOne<{ permission_overrides: Record<string, boolean> }>(
+    'SELECT permission_overrides FROM users WHERE id = $1', [brokerId]);
+  assert.deepEqual(stored!.permission_overrides, { 'document.review': true, 'message.send': false },
+    'only the difference from the role is stored');
+
+  const audit = await queryOne<{ summary: string; after_json: unknown }>(
+    `SELECT summary, after_json FROM audit_log WHERE action = 'user.update' ORDER BY id DESC LIMIT 1`);
+  assert.match(audit!.summary, /permissions changed/);
+  assert.ok(JSON.stringify(audit!.after_json).includes('document.review'));
+});
+
+test('a broker cannot manage staff', async () => {
+  const result = await call('broker', 'POST', '/staff', {
+    first_name: 'Evil', last_name: 'Twin', email: 'twin@example.com', mobile_phone: '4165550100',
+    role: 'technical_admin',
   });
-  assert.equal(with_reason.status, 200);
-
-  const audit = await queryOne<{ summary: string }>(
-    `SELECT summary FROM audit_log WHERE action = 'user.update' ORDER BY at DESC LIMIT 1`);
-  assert.match(audit!.summary, /Covering for the underwriter/);
+  assert.equal(result.status, 403);
 });
 
 // ── Templates ──────────────────────────────────────────────────────────────

@@ -25,13 +25,13 @@
  * the parts that are — consent, identification, unsubscribe — are enforced by
  * evaluateSend and the footer, not by the wording of a template.
  */
-import type { AutomationDefinition } from './automation.ts';
+import type { AutomationDefinitionInput } from './automation.ts';
 
 export type DefaultAutomation = {
   key: string;
   name: string;
   description: string;
-  definition: AutomationDefinition;
+  definition: AutomationDefinitionInput;
 };
 
 /** Stops that belong on every client-facing sequence. */

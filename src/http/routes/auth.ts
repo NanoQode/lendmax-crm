@@ -13,8 +13,10 @@ import {
 import { recordAudit, recordAuditSafely } from '../../services/audit.ts';
 import { ROLES } from '../../domain/permissions.ts';
 import { AppError, asyncRoute } from '../middleware/errors.ts';
-import { attachUser, permissionsOf, requireAuth, SESSION_COOKIE } from '../middleware/auth.ts';
+import { actorOf, attachUser, permissionsOf, requireAuth, SESSION_COOKIE } from '../middleware/auth.ts';
 import { toE164 } from '../../lib/phone.ts';
+import { activateAccount, describeInvitation } from '../../services/staff.ts';
+import { getSignature, previewSignature, rebuildSignature, saveSignature } from '../../services/signature.ts';
 
 export const authRoutes: Router = Router();
 
@@ -89,6 +91,34 @@ authRoutes.post(
   }),
 );
 
+// ── Activation ─────────────────────────────────────────────────────────────
+// The link in the invitation email opens /activate in the client, which calls
+// these. POST rather than GET so the token is not written to access logs as
+// part of a URL any more often than the click itself already does.
+
+authRoutes.post(
+  '/invitation',
+  signInLimiter,
+  asyncRoute(async (req, res) => {
+    const { token } = z.object({ token: z.string().min(1).max(200) }).parse(req.body);
+    res.json({ ok: true, invitation: await describeInvitation(token) });
+  }),
+);
+
+authRoutes.post(
+  '/activate',
+  signInLimiter,
+  asyncRoute(async (req, res) => {
+    const { userId } = await activateAccount(req.body, req.ip);
+    // Activating is proving you hold the mailbox, so it signs you in: making
+    // somebody type the password they chose ten seconds ago proves nothing.
+    const session = await createSession(userId, { ip: req.ip, userAgent: req.get('user-agent') });
+    res.cookie(SESSION_COOKIE, session.token, { ...cookieOptions, expires: session.expiresAt });
+    await query('UPDATE users SET last_login_at = now() WHERE id = $1', [userId]);
+    res.json({ ok: true });
+  }),
+);
+
 authRoutes.post(
   '/logout',
   attachUser,
@@ -118,12 +148,19 @@ authRoutes.get(
       res.status(401).json({ ok: false, code: 'unauthenticated', error: 'Not signed in.' });
       return;
     }
-    const profile = await queryOne(
+    const profile = await queryOne<{ photo_key: string | null; photo_updated_at: Date | null }>(
       `SELECT display_name, title, licence_number, licence_province, mobile_phone,
-              direct_phone, office_phone, booking_url, photo_url, signature_html, signature_text
+              direct_phone, office_phone, booking_url, photo_url, signature_html, signature_text,
+              photo_key, photo_updated_at
          FROM user_profiles WHERE user_id = $1`,
       [req.user.id],
     );
+    // The picture is served from an endpoint, not stored as a URL. The version
+    // is what makes a new one appear: the path is otherwise unchanged and a
+    // browser holding the old one has no reason to ask again.
+    const photo = profile?.photo_key
+      ? `${env.BASE_PATH}/api/users/me/photo?v=${profile.photo_updated_at?.getTime() ?? 0}`
+      : null;
     const org = await queryOne(
       `SELECT id, name, home_province, timezone, logo_url FROM organizations WHERE id = $1`,
       [req.user.organization_id],
@@ -131,7 +168,7 @@ authRoutes.get(
     res.json({
       ok: true,
       user: publicUser(req.user),
-      profile,
+      profile: profile ? { ...profile, photo_key: undefined, photo: photo } : null,
       organization: org,
       permissions: permissionsOf(req.user),
       roleName: ROLES[req.user.role]?.name ?? req.user.role,
@@ -179,7 +216,10 @@ authRoutes.put(
 
     await withTransaction(async (client) => {
       await client.query(
-        `UPDATE users SET name = $2, timezone = COALESCE(NULLIF($3,''), timezone),
+        `UPDATE users SET name = btrim($2), timezone = COALESCE(NULLIF($3,''), timezone),
+                          first_name = split_part(btrim($2), ' ', 1),
+                          last_name = NULLIF(btrim(substr(btrim($2),
+                                        length(split_part(btrim($2), ' ', 1)) + 1)), ''),
                           profile_complete = true
           WHERE id = $1`,
         [user.id, input.name, input.timezone ?? ''],
@@ -201,6 +241,7 @@ authRoutes.put(
           input.booking_url || null,
         ],
       );
+      await rebuildSignature(client, user.id);
       await recordAudit(
         {
           organizationId: user.organization_id,
@@ -219,6 +260,20 @@ authRoutes.put(
     res.json({ ok: true });
   }),
 );
+
+// ── Your own email signature ───────────────────────────────────────────────
+
+authRoutes.get('/signature', attachUser, requireAuth, asyncRoute(async (req, res) => {
+  res.json({ ok: true, signature: await getSignature(req.user!.organization_id, req.user!.id) });
+}));
+
+authRoutes.post('/signature/preview', attachUser, requireAuth, asyncRoute(async (req, res) => {
+  res.json({ ok: true, ...(await previewSignature(req.user!.organization_id, req.user!.id, req.body)) });
+}));
+
+authRoutes.put('/signature', attachUser, requireAuth, asyncRoute(async (req, res) => {
+  res.json({ ok: true, signature: await saveSignature(actorOf(req), req.user!.id, req.body) });
+}));
 
 authRoutes.post(
   '/password',

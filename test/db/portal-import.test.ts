@@ -219,8 +219,9 @@ test('the same payload twice is a no-op', async () => {
   const { rows } = await query('SELECT id FROM applications');
   assert.equal(rows.length, 1, 'one application, not two');
 
-  const events = await query('SELECT event_type FROM domain_events');
-  assert.equal(events.rows.length, 1, 'and the created event is not emitted twice');
+  const events = await query<{ event_type: string }>('SELECT event_type FROM domain_events ORDER BY id');
+  assert.deepEqual(events.rows.map((r) => r.event_type), ['customer.created', 'application.created'],
+    'a new client and a new application, each once — the second push emits nothing');
 });
 
 test('a customer is reused across pushes, and matched on phone or email', async () => {

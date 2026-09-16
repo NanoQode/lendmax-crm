@@ -23,6 +23,7 @@ import {
   approvalBlockers, deriveItem, gatherEvidence, openCase, reassess, syncDerivedItems,
   commissionPayoutBlockers,
 } from '../../src/services/compliance.ts';
+import { collectedFromClient } from '../../src/services/compliance-collected.ts';
 
 let orgId: string;
 let userId: string;
@@ -354,4 +355,52 @@ test('a rejected item blocks commission just as an outstanding one does', async 
   const blockers = await commissionPayoutBlockers(applicationId);
   assert.equal(blockers.length, 1);
   assert.equal(blockers[0]!.item_key, rows[0]!.item_key);
+});
+
+test('the Compliance tab gathers everything collected from the client, and hides what the reader may not see', async () => {
+  await query(
+    `UPDATE customers SET email = 'test@example.com', phone_e164 = '+14165550142', lead_source = 'website'
+      WHERE id = $1`, [customerId]);
+  await query(
+    `UPDATE applications SET portal_data = $2::jsonb, submitted_at = now() WHERE id = $1`,
+    [applicationId, JSON.stringify({ purpose: { purpose: 'Purchase' }, applicants: [{ first_name: 'Test' }],
+                                     meta: { other_properties: { owns_other: false } } })]);
+  await query(
+    `INSERT INTO documents (organization_id, application_id, customer_id, filename, display_label,
+                            storage_key, source, review_status)
+     VALUES ($1,$2,$3,'t4.pdf','T4 2025','k1','client_upload','accepted'),
+            ($1,$2,$3,'old.pdf','Old pay stub','k2','client_upload','superseded')`,
+    [orgId, applicationId, customerId]);
+  await query(
+    `INSERT INTO consents (organization_id, customer_id, channel, purpose, basis, granted, source, collected_at)
+     VALUES ($1,$2,'email','marketing','express',true,'portal_application', now() - interval '2 days'),
+            ($1,$2,'email','marketing','withdrawn',false,'reply_stop', now())`, [orgId, customerId]);
+
+  const actor = { organizationId: orgId, kind: 'user' as const, userId, name: 'Ravi' };
+  const full = await collectedFromClient({ actor, viewAll: true, edit: false, viewFinancials: true }, applicationId);
+
+  assert.equal(full.contact.email, 'test@example.com');
+  assert.equal(full.contact.lead_source, 'website');
+  assert.ok(full.application.submitted_at);
+  const state = Object.fromEntries(full.sections.map((x) => [x.id, x.state]));
+  assert.notEqual(state.purpose, 'not_started', 'an answered section is not reported as missing');
+  assert.equal(state.assets, 'not_started', 'an untouched section says so');
+  assert.equal(state.other_properties, 'declared', '"no other property" answers the section');
+  const purpose = full.sections.find((x) => x.id === 'purpose')!;
+  if (purpose.state === 'started') assert.ok(purpose.missing! > 0, 'a partly filled section says how much is missing');
+  assert.equal(state.review, 'complete', 'a submitted application has its review done');
+  assert.ok(!('documents' in state), 'uploads are listed as documents, not as a form section');
+  assert.deepEqual(full.documents.map((d) => d.label), ['T4 2025'], 'a superseded document is not counted');
+  assert.equal(full.consents.length, 1, 'one line per channel and purpose');
+  assert.equal(full.consents[0]!.granted, false, 'the latest consent record wins — a withdrawal included');
+
+  const restricted = await collectedFromClient({ actor, viewAll: true, edit: false, viewFinancials: false }, applicationId);
+  for (const id of ['income', 'assets', 'liabilities']) {
+    assert.equal(restricted.sections.find((x) => x.id === id)?.state, 'hidden');
+  }
+  assert.ok(restricted.hidden_reason);
+
+  await assert.rejects(
+    collectedFromClient({ actor, viewAll: false, edit: false, viewFinancials: true }, applicationId),
+    /not found/, 'a file the reader is not on, and cannot see, is not readable here either');
 });

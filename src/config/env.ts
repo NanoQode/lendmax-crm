@@ -79,6 +79,10 @@ const RawEnv = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().optional(),
+  // sandbox: an in-memory stand-in for Google, so booking, Meet links and
+  // two-way sync can be exercised without a Google Cloud app. Defaults to
+  // live in production and sandbox everywhere else.
+  GOOGLE_CALENDAR_MODE: z.enum(['sandbox', 'live']).optional(),
 
   AI_ENABLED: bool,
   ANTHROPIC_API_KEY: z.string().optional(),
@@ -88,7 +92,8 @@ const RawEnv = z.object({
   SENTRY_DSN: z.string().optional(),
 });
 
-export type Env = z.infer<typeof RawEnv> & {
+export type Env = Omit<z.infer<typeof RawEnv>, 'GOOGLE_CALENDAR_MODE'> & {
+  GOOGLE_CALENDAR_MODE: 'sandbox' | 'live';
   SESSION_SECRET: string;
   isProduction: boolean;
   isTest: boolean;
@@ -144,7 +149,11 @@ function load(source: NodeJS.ProcessEnv = process.env): Env {
     );
   }
 
-  return { ...env, SESSION_SECRET: secret, isProduction, isTest: env.NODE_ENV === 'test' };
+  return {
+    ...env,
+    GOOGLE_CALENDAR_MODE: env.GOOGLE_CALENDAR_MODE ?? (isProduction ? 'live' : 'sandbox'),
+    SESSION_SECRET: secret, isProduction, isTest: env.NODE_ENV === 'test',
+  };
 }
 
 export const env: Env = load();

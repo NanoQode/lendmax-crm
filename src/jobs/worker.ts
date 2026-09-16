@@ -12,9 +12,17 @@
  */
 import { randomUUID } from 'node:crypto';
 import { log } from '../lib/logger.ts';
-import { claim, fail, pruneFinishedJobs, reclaimStalled, succeed, type Job } from './queue.ts';
+import { claim, enqueue, fail, pruneFinishedJobs, reclaimStalled, succeed, type Job } from './queue.ts';
 
-export type JobHandler = (job: Job) => Promise<void>;
+/**
+ * A handler finishes, or asks to run again later.
+ *
+ * Recurring work returns `{ rerunAt }` rather than enqueueing itself: the
+ * running job still holds its dedupe key, so a self-enqueue with the same key
+ * is silently dropped and the chain ends after one run. The worker re-queues
+ * it after marking this one done, when the key is free.
+ */
+export type JobHandler = (job: Job) => Promise<void | { rerunAt: Date }>;
 
 const handlers = new Map<string, JobHandler>();
 
@@ -145,8 +153,16 @@ export class Worker {
 
     const started = performance.now();
     try {
-      await handler(job);
+      const outcome = await handler(job);
       await succeed(job.id);
+      if (outcome?.rerunAt) {
+        await enqueue(job.kind, job.payload, {
+          organizationId: job.organization_id,
+          queue: this.options.queue,
+          runAfter: outcome.rerunAt,
+          dedupeKey: job.dedupe_key ?? undefined,
+        });
+      }
       const ms = Math.round(performance.now() - started);
       if (ms > 5000) log.warn('slow job', { id: job.id, kind: job.kind, ms });
       else log.debug('job done', { id: job.id, kind: job.kind, ms });

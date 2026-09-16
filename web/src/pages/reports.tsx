@@ -14,6 +14,7 @@ import { useState } from 'preact/hooks';
 import { compactMoney, formatDate, money } from '../lib/api.ts';
 import { useAsync, type Session } from '../lib/store.ts';
 import { Badge, Empty, ErrorNote, Skeleton } from '../components/ui.tsx';
+import { DataTable } from '../components/data-table.tsx';
 
 type Tab = 'pipeline' | 'volume' | 'team' | 'campaigns' | 'compliance';
 
@@ -124,27 +125,18 @@ function PipelineReport({ months }: { months: string }) {
             Median, and the slowest tenth — one file stuck for a year makes an average lie
           </span>
         </div>
-        <div class="table-wrap">
-          <table class="data">
-            <thead>
-              <tr><th>Stage</th><th>Files</th><th>Median</th><th>Slowest 10%</th></tr>
-            </thead>
-            <tbody>
-              {d.dwell.map((row) => (
-                <tr key={row.stage_key}>
-                  <td data-primary data-label="Stage">{row.label}</td>
-                  <td data-label="Files" class="num">{row.files}</td>
-                  <td data-label="Median" class="num">
-                    {row.median_days === null ? '—' : `${row.median_days} days`}
-                  </td>
-                  <td data-label="Slowest 10%" class="num">
-                    {row.p90_days === null ? '—' : `${row.p90_days} days`}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable label="How long files sit" compact rows={d.dwell} rowKey={(r) => r.stage_key}
+          columns={[
+            { key: 'label', header: 'Stage', primary: true },
+            { key: 'pipeline_name', header: 'Pipeline', filter: 'auto' },
+            { key: 'files', header: 'Files', filter: 'number', align: 'right', value: (r) => Number(r.files) },
+            { key: 'median_days', header: 'Median', filter: 'number', align: 'right',
+              value: (r) => (r.median_days === null ? null : Number(r.median_days)),
+              render: (r) => (r.median_days === null ? '—' : `${r.median_days} days`) },
+            { key: 'p90_days', header: 'Slowest 10%', filter: 'number', align: 'right',
+              value: (r) => (r.p90_days === null ? null : Number(r.p90_days)),
+              render: (r) => (r.p90_days === null ? '—' : `${r.p90_days} days`) },
+          ]} />
       </div>
 
       <div class="card">
@@ -315,33 +307,21 @@ function TeamReport({ months }: { months: string }) {
         <h2>The brokerage</h2>
         <span class="text-sm text-muted">Last {state.data.months} months</span>
       </div>
-      <div class="table-wrap">
-        <table class="data">
-          <thead>
-            <tr>
-              <th>Person</th><th>Open</th><th>Funded</th><th>Volume</th>
-              <th>Lost</th><th>Days to fund</th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.data.people.map((p) => (
-              <tr key={p.id}>
-                <td data-primary data-label="Person">
-                  {p.name}
-                  <span class="text-sm text-muted"> · {p.role}</span>
-                </td>
-                <td data-label="Open" class="num">{p.open_files}</td>
-                <td data-label="Funded" class="num">{p.funded}</td>
-                <td data-label="Volume" class="num">{compactMoney(p.volume)}</td>
-                <td data-label="Lost" class="num">{p.lost}</td>
-                <td data-label="Days to fund" class="num">
-                  {p.avg_days_to_fund ?? '—'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable label="The brokerage" compact rows={state.data.people} rowKey={(p) => p.id}
+        initialSort={{ key: 'funded', dir: 'desc' }}
+        columns={[
+          { key: 'name', header: 'Person', primary: true,
+            render: (p) => <>{p.name}<span class="text-sm text-muted"> · {p.role}</span></> },
+          { key: 'role', header: 'Role', filter: 'auto' },
+          { key: 'open_files', header: 'Open', filter: 'number', align: 'right', value: (p) => Number(p.open_files) },
+          { key: 'funded', header: 'Funded', filter: 'number', align: 'right', value: (p) => Number(p.funded) },
+          { key: 'volume', header: 'Volume', filter: 'number', align: 'right', value: (p) => Number(p.volume),
+            render: (p) => compactMoney(p.volume) },
+          { key: 'lost', header: 'Lost', filter: 'number', align: 'right', value: (p) => Number(p.lost) },
+          { key: 'avg_days_to_fund', header: 'Days to fund', filter: 'number', align: 'right',
+            value: (p) => (p.avg_days_to_fund === null ? null : Number(p.avg_days_to_fund)),
+            render: (p) => p.avg_days_to_fund ?? '—' },
+        ]} />
       <div class="card-body text-sm text-muted">
         Counts only files where the person is the assigned broker. A file with two people on
         it counts once for each, so the columns do not sum to the brokerage total.
@@ -375,43 +355,34 @@ function CampaignReport({ months }: { months: string }) {
         <h2>Campaigns</h2>
         <span class="text-sm text-muted">Ordered by what they produced, not by opens</span>
       </div>
-      <div class="table-wrap">
-        <table class="data">
-          <thead>
-            <tr>
-              <th>Campaign</th><th>Sent</th><th>Applications</th><th>Funded</th>
-              <th>Volume</th><th>Opened</th><th>Unsubscribed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.data.campaigns.map((c) => (
-              <tr key={c.id}>
-                <td data-primary data-label="Campaign">
-                  {c.name}
-                  <div class="text-sm text-muted">
-                    {formatDate(c.send_started_at)} · {c.channel}
-                    {c.suppressed > 0 && ` · ${c.suppressed} held back`}
-                  </div>
-                </td>
-                <td data-label="Sent" class="num">{c.sent}</td>
-                <td data-label="Applications" class="num">
-                  <strong>{c.applications}</strong>
-                </td>
-                <td data-label="Funded" class="num"><strong>{c.funded}</strong></td>
-                <td data-label="Volume" class="num">{compactMoney(c.funded_volume)}</td>
-                <td data-label="Opened" class="num text-muted">
-                  {c.sent ? `${Math.round((c.opened / c.sent) * 100)}%` : '—'}
-                </td>
-                <td data-label="Unsubscribed" class="num">
-                  {c.unsubscribed > 0
-                    ? <span style={{ color: 'var(--danger-text)' }}>{c.unsubscribed}</span>
-                    : '0'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable label="Campaigns" compact rows={state.data.campaigns} rowKey={(c) => c.id}
+        columns={[
+          { key: 'name', header: 'Campaign', primary: true,
+            render: (c) => (
+              <>
+                {c.name}
+                <div class="text-sm text-muted">
+                  {formatDate(c.send_started_at)} · {c.channel}
+                  {c.suppressed > 0 && ` · ${c.suppressed} held back`}
+                </div>
+              </>
+            ) },
+          { key: 'channel', header: 'Channel', filter: 'auto' },
+          { key: 'sent', header: 'Sent', filter: 'number', align: 'right', value: (c) => Number(c.sent) },
+          { key: 'applications', header: 'Applications', filter: 'number', align: 'right',
+            value: (c) => Number(c.applications), render: (c) => <strong>{c.applications}</strong> },
+          { key: 'funded', header: 'Funded', filter: 'number', align: 'right',
+            value: (c) => Number(c.funded), render: (c) => <strong>{c.funded}</strong> },
+          { key: 'funded_volume', header: 'Volume', filter: 'number', align: 'right',
+            value: (c) => Number(c.funded_volume), render: (c) => compactMoney(c.funded_volume) },
+          { key: 'opened', header: 'Opened', filter: 'number', align: 'right',
+            value: (c) => (c.sent ? Math.round((c.opened / c.sent) * 100) : null),
+            render: (c) => <span class="text-muted">{c.sent ? `${Math.round((c.opened / c.sent) * 100)}%` : '—'}</span> },
+          { key: 'unsubscribed', header: 'Unsubscribed', filter: 'number', align: 'right',
+            value: (c) => Number(c.unsubscribed),
+            render: (c) => (c.unsubscribed > 0
+              ? <span style={{ color: 'var(--danger-text)' }}>{c.unsubscribed}</span> : '0') },
+        ]} />
       <div class="card-body text-sm text-muted">
         An open is a weak signal — images-off clients never register one, and a scanner can
         register several. Applications and fundings are the columns worth reading.
@@ -480,30 +451,18 @@ function ComplianceReport() {
 
       <div class="card">
         <div class="card-head"><h2>Retention</h2></div>
-        <div class="table-wrap">
-          <table class="data">
-            <thead>
-              <tr><th>Policy</th><th>From</th><th>Keep for</th><th>Then</th><th>Source</th></tr>
-            </thead>
-            <tbody>
-              {d.retention_policies.map((p) => (
-                <tr key={p.key}>
-                  <td data-primary data-label="Policy">{p.name}</td>
-                  <td data-label="From">{p.anchor.replace(/_/g, ' ')}</td>
-                  <td data-label="Keep for" class="num">
-                    {Math.round(p.retain_months / 12 * 10) / 10} years
-                  </td>
-                  <td data-label="Then">
-                    <Badge tone={p.action === 'review' ? 'neutral' : 'warn'}>{p.action}</Badge>
-                  </td>
-                  <td data-label="Source" class={p.source_note ? '' : 'text-muted'}>
-                    {p.source_note ?? 'Not recorded'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable label="Retention" compact rows={d.retention_policies} rowKey={(p) => p.key}
+          columns={[
+            { key: 'name', header: 'Policy', primary: true },
+            { key: 'anchor', header: 'From', filter: 'auto', value: (p) => String(p.anchor).replace(/_/g, ' ') },
+            { key: 'retain_months', header: 'Keep for', filter: 'number', align: 'right',
+              value: (p) => Math.round(p.retain_months / 12 * 10) / 10,
+              render: (p) => `${Math.round(p.retain_months / 12 * 10) / 10} years` },
+            { key: 'action', header: 'Then', filter: 'auto',
+              render: (p) => <Badge tone={p.action === 'review' ? 'neutral' : 'warn'}>{p.action}</Badge> },
+            { key: 'source_note', header: 'Source',
+              render: (p) => <span class={p.source_note ? '' : 'text-muted'}>{p.source_note ?? 'Not recorded'}</span> },
+          ]} />
         <div class="card-body text-sm text-muted">{d.retention_note}</div>
       </div>
     </div>

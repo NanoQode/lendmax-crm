@@ -201,6 +201,171 @@ the account with the most access or it is not a principle. Where a genuine
 support need exists, an override grants exactly one capability and the grant is
 auditable.
 
+### Staff, round robin and permissions
+
+Staff are managed on the **Staff** screen (and through the API). Permissions
+are grouped by module (`MODULES` in `src/domain/permissions.ts`). The staff
+form ticks a role's defaults and lets an admin tick or untick anything for one
+person. Only the difference from the role is stored, and every change is in the
+audit log with before and after.
+
+- **Adding somebody** emails them a one-time activation link (72 hours). They
+  cannot sign in, and are not given leads, until they have used it. Sign-in
+  refuses an account that has not been activated.
+- **Round robin** fills one owner per new lead, whether it arrives from the
+  portal, the API or "New customer". The next owner is whoever was handed a
+  lead longest ago among staff who are active, activated and switched on.
+  There is a brokerage-wide on/off and a per-person switch. Off for a person
+  only skips them in the rotation; they can still be assigned by hand.
+- **Deactivating or deleting** somebody with open leads or tasks requires
+  choosing one active person to take them all. Funded and lost files keep their
+  original owner. "Delete" archives the account: their history stays and their
+  email is freed.
+
+### Email signatures
+
+Everybody has one. It is either the **standard** signature, built from the profile
+(name, title, brokerage, licence, phones, email, booking link) and kept current
+when any of those change, or a **custom** one written under *Your profile*. A
+custom signature is a few lines of text, not HTML. It can use profile fields
+such as `{mobile}`, `**bold**`, and URLs or email addresses (linked
+automatically). A line whose field is empty is left out. Everything typed is
+escaped before it becomes HTML (`src/domain/signature.ts`), so a signature
+cannot put markup into a client's inbox.
+
+It is added to one-to-one emails from the composer (with a checkbox to leave
+it off one email, and never to texts). Templates and automations can place it
+with `{signature}`; an automation signs as the file's broker. A campaign's
+signature block uses the sender's. An admin can set anybody's from the Staff
+screen.
+
+### Pipelines
+
+**Manage pipelines** lets an admin run several pipelines, each with its own
+stages (name, colour, outcome type, win %, entry rules, order, active switch).
+Each of the four application purposes can be given to one pipeline, and
+anything unclaimed goes to the default. Staff can move a file into another
+pipeline, choosing its stage.
+
+- **Stages stay identified by key**, unique across all pipelines. Everything
+  that already referred to stages — files, stage history, automations,
+  campaigns, reports — kept working unchanged. A file's `pipeline_id` is
+  derived from its stage by a trigger (migration 0019), so they can't disagree.
+- **Rules:** an active pipeline always has an active In-progress, Won and Lost
+  stage. There is always one active default pipeline. A stage or pipeline in
+  use is deleted only by saying where its files go. They are moved (recorded,
+  no client messages) and it is archived, so history keeps its name.
+  Deactivating keeps its files where they are and stops new ones entering.
+- **For other modules:** `pipelineOptions` / `pipelineCatalogue` for lists,
+  `entryStage(purpose)` for where a new file starts, and `moveFileToStage` for
+  any stage change (`src/services/pipelines.ts`, `stage-moves.ts`). Campaign
+  audiences and automation conditions can filter by pipeline.
+
+### Required documents
+
+**Required documents** holds the list of documents a client is asked for, per
+application purpose (Purchase, Renew, Refinance, Home Equity Line). Each entry
+has a name, the description the client reads, the accepted file formats (only
+ones the uploader accepts — a unit test holds the two together), required or if
+applicable, once per file or from each applicant, a category, an order and an
+active switch. An empty purpose offers a suggested starting list. Permissions:
+`required_document.view` / `.manage`.
+
+For the application's request step, when it is built: `checklistFor(purpose)`
+in `src/services/required-documents.ts` is the list, `document_request_items`
+has `required_document_id` and `formats` to record what each item came from,
+and `fileMatchesFormats` in `src/domain/required-documents.ts` checks an upload
+against it.
+
+### Appointments
+
+**Appointments** lists every meeting with a client, in tabs: Upcoming, Needs
+outcome, Attended, Missed, Cancelled and All. Every column can be filtered,
+and there is a week view.
+
+Who can do what:
+- A person with `appointment.view` / `.manage` sees and books meetings with
+  their own clients (files assigned to them).
+- `appointment.view_all` / `.manage_all` covers everyone's. Whoever holds
+  these picks the staff member first, and only that person's clients are
+  offered.
+- Technical Admin and Manager have all four. Brokers and underwriters have
+  their own. Compliance can see everyone's.
+
+What each change does:
+- **Pipeline stages.** Booking, attended and missed each move the file to a
+  stage chosen per pipeline (Pipelines → a pipeline → Appointments). The
+  Mortgage pipeline defaults are Appointment Booked, Application and Nurture.
+  Booking only moves a file forward. An outcome only moves it while it is
+  still where booking left it. A file somebody has since moved on, or that is
+  Funded or Lost, stays put. Stage entry rules still apply.
+- **Emails.** The client is emailed on booking, a new time and a
+  cancellation. The client and the host get a reminder 15 minutes before
+  (`appointments.tick`, every minute). The four emails are templates under
+  Settings → Templates, and they are transactional.
+- **The popup.** When a meeting starts, the host and whoever booked it are
+  asked whether the client is there: attended, missed, reschedule, or "ask me
+  at the end". It stops asking after 12 hours; the meeting then waits under
+  Needs outcome.
+- **Automations.** They hear `appointment.booked`, `appointment.completed`
+  and `appointment.no_show` as before.
+
+**Google Calendar.** Each person connects their own calendar on the
+Appointments page. Once connected:
+- meetings they host become events in that calendar, with the client invited
+  and a Meet link for video calls;
+- their Google busy times are checked before anyone books them;
+- a meeting moved or deleted in Google is moved or cancelled here
+  (`google.sync`, every 5 minutes).
+
+Tokens are encrypted with `CREDENTIALS_KEY`.
+
+`GOOGLE_CALENDAR_MODE` is `live` in production and `sandbox` elsewhere. The
+sandbox is an in-memory stand-in for Google, so the whole flow works locally
+without a Google account.
+
+To go live, create an OAuth client in the Google Cloud console:
+1. Create a project and enable the Google Calendar API.
+2. On the OAuth consent screen, add the scopes `calendar.events` and `calendar.readonly`.
+   - If every staff member is on the brokerage's Google Workspace, choose "Internal" and skip Google's review.
+   - Otherwise choose "External" and submit for verification: both scopes are sensitive.
+3. Create a Web OAuth client with the redirect URI `https://lendmax.ca/crm/api/integrations/google/callback`.
+4. Enter the client ID, secret and redirect URI under Integrations → Google Calendar.
+
+### Activity logs
+
+**Activity logs** shows what each person did in the last 30 days: sign-ins,
+every change the CRM records, and the client files they opened (once per
+person per file per half hour). Everybody sees their own. Anyone with
+`activity.view_all` ("See everyone's activity") sees the whole team and can
+pick whose. That permission is on by default for Technical Admin, Manager and
+Compliance Manager, and off for brokers and underwriters.
+
+Entries cannot be edited or deleted. There is no endpoint for it, and the
+`activity_logs` table refuses an `UPDATE`, and a `DELETE` of anything younger
+than 30 days. The `activity.purge` job removes the rest daily, and the screen
+reads only the last 30 days whatever the purge has reached.
+
+This is the second of two layers. It mirrors `audit_log` as entries are
+written, without replacing it. The hash-chained compliance trail is separate
+and is kept under the retention policies. Mirroring runs inside the audit
+entry's transaction, behind a savepoint, so a rolled-back change leaves no
+activity and a failed activity write never fails the change.
+
+### Tables
+
+Every table goes through `web/src/components/data-table.tsx`: a search box, a
+filter under each header (text, number such as `>5` or `10-20`, or a
+dropdown), sorting by clicking a header, and pagination. Small lists are
+handled in the browser; customers, required documents, activity logs and
+appointments are paged, filtered and sorted by the server.
+
+### Connecting other websites
+
+`/api/v1`, authenticated by per-website API keys created under **API access**.
+Each key holds only the permissions it was given. See
+[`docs/API.md`](docs/API.md).
+
 ---
 
 ## 4. The parts worth knowing about
@@ -307,7 +472,7 @@ than with a guessed stress-test rate.
 ## 5. Layout
 
 ```
-migrations/          0001–0015, checksummed, one transaction each
+migrations/          0001–0019, checksummed, one transaction each
 src/
   config/env.ts      validated at boot; refuses to start rather than start wrong
   db/                pool (NUMERIC and DATE parsers), migration runner
@@ -318,13 +483,15 @@ src/
                        secrets (AES-256-GCM)
   services/          auth, audit, portal-import, messaging, storage, assignment,
                        integrations, automation-engine, compliance, campaigns,
-                       unsubscribe
+                       unsubscribe, staff, leads, api-keys, signature,
+                       required-documents, pipelines, stage-moves
   integrations/      scarlett, voipms, email — each reading dashboard config
   jobs/              queue (FOR UPDATE SKIP LOCKED), worker, handlers
   http/              app, middleware, routes
 web/src/             Preact client — components, pages, design tokens
 docs/field-map.md    the 124-field portal mapping
-test/                170 unit + 90 database-backed
+docs/API.md          the v1 API for connected websites
+test/                205 unit + 182 database-backed
 ```
 
 `npm run verify` runs the type checker over both the server and the front end,

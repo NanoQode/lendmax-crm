@@ -10,22 +10,25 @@
  * from this screen and not from a database.
  */
 import { useState } from 'preact/hooks';
-import { ApiError, formatDate, post, put, relativeTime } from '../lib/api.ts';
-import { toast, useAsync, type Config, type Session } from '../lib/store.ts';
+import { ApiError, formatDate, post, put } from '../lib/api.ts';
+import { navigate, toast, useAsync, useRoute, type Config, type Session } from '../lib/store.ts';
 import { Badge, Empty, ErrorNote, Field, Modal, Skeleton } from '../components/ui.tsx';
+import { DataTable } from '../components/data-table.tsx';
 
-type Section = 'brokerage' | 'pipeline' | 'people' | 'templates' | 'compliance';
+type Section = 'brokerage' | 'pipeline' | 'templates' | 'compliance' | 'funding';
 
 export function SettingsAdminPage({ session }: { session: Session; config: Config | null }) {
-  const [section, setSection] = useState<Section>('brokerage');
+  const { query } = useRoute();
+  const [section, setSection] = useState<Section>((query.get('section') as Section | null) ?? 'brokerage');
   const canManage = session.permissions.includes('settings.manage');
 
   const sections: Array<[Section, string, string]> = [
     ['brokerage', 'Brokerage', 'settings.view'],
-    ['pipeline', 'Pipeline & lists', 'settings.view'],
-    ['people', 'People', 'user.view'],
+    ['pipeline', 'Lists', 'settings.view'],
     ['templates', 'Templates', 'settings.view'],
     ['compliance', 'Compliance rules', 'settings.view'],
+    // The admin's alone: no staff role holds commission.view by default.
+    ['funding', 'Funding', 'commission.view'],
   ];
 
   return (
@@ -50,9 +53,90 @@ export function SettingsAdminPage({ session }: { session: Session; config: Confi
 
       {section === 'brokerage' && <BrokerageSection canManage={canManage} />}
       {section === 'pipeline' && <VocabularySection canManage={canManage} />}
-      {section === 'people' && <PeopleSection session={session} />}
       {section === 'templates' && <TemplateSection session={session} />}
       {section === 'compliance' && <ComplianceRulesSection canManage={canManage} />}
+      {section === 'funding' && session.permissions.includes('commission.view') && (
+        <CommissionSplitSection canEdit={session.permissions.includes('commission.edit')} />
+      )}
+    </div>
+  );
+}
+
+// ── Funding ────────────────────────────────────────────────────────────────
+
+type CommissionSplit = {
+  staff_percent: number; brokerage_percent: number;
+  effective_from: string | null; updated_by_name: string | null; is_default: boolean;
+};
+
+/**
+ * What the staff member on a file makes of its commission. Shown only to the
+ * admin; the Funding tab reads it, and confirming a funding starts from it.
+ */
+function CommissionSplitSection({ canEdit }: { canEdit: boolean }) {
+  const state = useAsync<{ split: CommissionSplit }>('/admin/commission-split');
+  const [staff, setStaff] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  if (state.status === 'loading') return <Skeleton rows={2} height={70} />;
+  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
+                     onRetry={state.reload} />;
+
+  const current = state.data.split;
+  const typed = staff ?? String(current.staff_percent);
+  const n = Number(typed);
+  const valid = typed.trim() !== '' && Number.isFinite(n) && n >= 0 && n <= 100;
+  const changed = valid && n !== current.staff_percent;
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await put('/admin/commission-split', { staff_percent: n });
+      toast(`Saved. Staff ${n}% · Lendmax ${Math.round((100 - n) * 100) / 100}%.`, 'ok');
+      setStaff(null);
+      state.reload();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : 'Could not save that.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Commission split</h2>
+          <p class="text-sm text-muted" style={{ margin: '3px 0 0' }}>
+            What the staff member on a file makes of its commission, and what Lendmax keeps.
+            Only admins see this and the Funding tab.
+          </p>
+        </div>
+        {current.is_default && <Badge tone="neutral">Starting 50/50</Badge>}
+      </div>
+      <div class="card-body">
+        <div class="grid-2">
+          <Field label="Staff member %">
+            <input type="number" min={0} max={100} step="0.5" value={typed} disabled={!canEdit || busy}
+                   onInput={(e) => setStaff((e.target as HTMLInputElement).value)} />
+          </Field>
+          <Field label="Lendmax %" hint="Always the rest of the 100%.">
+            <input value={valid ? String(Math.round((100 - n) * 100) / 100) : '—'} disabled />
+          </Field>
+        </div>
+        {!valid && <p class="text-sm" style={{ color: 'var(--danger-text)' }}>Enter a percentage from 0 to 100.</p>}
+        <p class="text-sm text-muted">
+          {current.is_default
+            ? 'Nobody has changed it yet.'
+            : <>In force since {formatDate(current.effective_from)}{current.updated_by_name ? `, set by ${current.updated_by_name}` : ''}.</>}
+          {' '}A change applies to fundings confirmed from today; commissions already confirmed keep the split they were recorded with.
+        </p>
+        {canEdit && (
+          <button class="btn btn-primary" disabled={!changed || busy} onClick={save}>
+            {busy ? 'Saving…' : 'Save split'}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -259,17 +343,6 @@ const VOCABULARIES: Array<{ name: string; label: string; help: string;
                             columns: Array<{ key: string; label: string; type: string;
                                              options?: string[] }> }> = [
   {
-    name: 'stages', label: 'Pipeline stages',
-    help: 'The order files move in. One stage has to mean funded and one has to mean lost, '
-      + 'or nothing can ever be closed.',
-    columns: [
-      { key: 'label', label: 'Name', type: 'text' },
-      { key: 'category', label: 'Means', type: 'select',
-        options: ['open', 'parked', 'won', 'lost'] },
-      { key: 'probability', label: 'Likelihood %', type: 'number' },
-    ],
-  },
-  {
     name: 'transaction_types', label: 'Transaction types',
     help: 'What a file is for. Used to choose which documents are asked for.',
     columns: [{ key: 'label', label: 'Name', type: 'text' }],
@@ -336,6 +409,10 @@ function VocabularySection({ canManage }: { canManage: boolean }) {
 
   return (
     <div class="stack">
+      <div class="alert alert-info">
+        Pipeline stages are set up per pipeline under{' '}
+        <a href="/crm/pipelines" onClick={(e) => { e.preventDefault(); navigate('/pipelines'); }}>Manage pipelines</a>.
+      </div>
       <div class="tabs tabs-inner" role="tablist">
         {VOCABULARIES.map((v) => (
           <button key={v.name} class="tab" role="tab" aria-selected={which === v.name}
@@ -547,254 +624,7 @@ function EntryRulesForm({ stage, onClose, onSave }: {
   );
 }
 
-// ── People ─────────────────────────────────────────────────────────────────
-
-type AdminUser = {
-  id: string; email: string; name: string; role: string; active: boolean;
-  mfa_enabled: boolean; last_login_at: string | null; created_at: string;
-  locked_until: string | null; mobile_phone: string | null; title: string | null;
-  licence_number: string | null; open_assignments: number;
-  permission_overrides: Record<string, boolean>;
-};
-
-function PeopleSection({ session }: { session: Session }) {
-  const state = useAsync<{
-    users: AdminUser[];
-    roles: Array<{ key: string; name: string; description: string; permissions: string[] }>;
-    permissions: Record<string, string>;
-    can_edit: boolean;
-  }>('/admin/users');
-  const [editing, setEditing] = useState<AdminUser | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [showingRole, setShowingRole] = useState<string | null>(null);
-
-  if (state.status === 'loading') return <Skeleton rows={4} height={60} />;
-  if (state.status === 'error') return <ErrorNote error={state.error} code={state.code} permission={state.permission}
-                     onRetry={state.reload} />;
-
-  const d = state.data;
-
-  return (
-    <div class="stack">
-      <div class="card">
-        <div class="card-head">
-          <h2>People</h2>
-          {d.can_edit && <button class="btn btn-sm" onClick={() => setAdding(true)}>Add somebody</button>}
-        </div>
-        <div class="card-body-flush">
-          {d.users.map((u) => (
-            <div key={u.id} class={`list-row${u.active ? '' : ' vocab-inactive'}`}>
-              <div style={{ minWidth: 0 }}>
-                <strong>{u.name}</strong>
-                {u.id === session.user.id && <span class="text-sm text-muted"> · you</span>}
-                {!u.active && <Badge tone="neutral">Deactivated</Badge>}
-                {Object.keys(u.permission_overrides ?? {}).length > 0 && (
-                  <Badge tone="warn">Exception</Badge>
-                )}
-                <div class="text-sm text-muted">
-                  {u.email}
-                  {u.title ? ` · ${u.title}` : ''}
-                  {' · '}
-                  {u.last_login_at ? `last in ${relativeTime(u.last_login_at)}` : 'never signed in'}
-                  {u.open_assignments > 0 && ` · ${u.open_assignments} file(s)`}
-                </div>
-              </div>
-              <div class="row" style={{ gap: 8 }}>
-                <button class="link-button text-sm"
-                        onClick={() => setShowingRole(u.role)}>{u.role.replace(/_/g, ' ')}</button>
-                {d.can_edit && (
-                  <button class="btn btn-sm" onClick={() => setEditing(u)}>Edit</button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h2>Roles</h2></div>
-        <div class="card-body-flush">
-          {d.roles.map((role) => (
-            <div key={role.key} class="list-row">
-              <div style={{ minWidth: 0 }}>
-                <strong>{role.name}</strong>
-                <div class="text-sm text-muted">{role.description}</div>
-              </div>
-              <button class="btn btn-sm btn-ghost" onClick={() => setShowingRole(role.key)}>
-                {role.permissions.length} permissions
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {showingRole && (
-        <Modal title={d.roles.find((r) => r.key === showingRole)?.name ?? showingRole}
-               onClose={() => setShowingRole(null)}
-               footer={<button class="btn" onClick={() => setShowingRole(null)}>Close</button>}>
-          <p class="text-sm text-muted">
-            {d.roles.find((r) => r.key === showingRole)?.description}
-          </p>
-          <div class="permission-list">
-            {(d.roles.find((r) => r.key === showingRole)?.permissions ?? []).map((p) => (
-              <div key={p}>
-                <code class="text-sm">{p}</code>
-                <span class="text-sm text-muted"> {d.permissions[p]}</span>
-              </div>
-            ))}
-          </div>
-        </Modal>
-      )}
-
-      {adding && (
-        <UserForm onClose={() => setAdding(false)}
-                  onSaved={() => { setAdding(false); state.reload(); }} />
-      )}
-      {editing && (
-        <UserForm user={editing} permissions={d.permissions}
-                  onClose={() => setEditing(null)}
-                  onSaved={() => { setEditing(null); state.reload(); }} />
-      )}
-    </div>
-  );
-}
-
-const ROLE_OPTIONS = ['broker', 'underwriter', 'manager', 'compliance_manager', 'technical_admin'];
-
-function UserForm({ user, permissions, onClose, onSaved }: {
-  user?: AdminUser; permissions?: Record<string, string>;
-  onClose: () => void; onSaved: () => void;
-}) {
-  const [form, setForm] = useState({
-    email: user?.email ?? '',
-    name: user?.name ?? '',
-    role: user?.role ?? 'broker',
-    title: user?.title ?? '',
-    mobile_phone: user?.mobile_phone ?? '',
-    licence_number: user?.licence_number ?? '',
-    active: user?.active ?? true,
-  });
-  const [overrides, setOverrides] = useState<Record<string, boolean>>(
-    user?.permission_overrides ?? {});
-  const [reason, setReason] = useState('');
-  const [error, setError] = useState('');
-  const [showOverrides, setShowOverrides] = useState(
-    Object.keys(user?.permission_overrides ?? {}).length > 0);
-
-  const set = (patch: Partial<typeof form>) => setForm({ ...form, ...patch });
-  const changedOverrides = JSON.stringify(overrides)
-    !== JSON.stringify(user?.permission_overrides ?? {});
-
-  const save = async () => {
-    setError('');
-    try {
-      if (user) {
-        await put(`/admin/users/${user.id}`, {
-          ...form,
-          permission_overrides: changedOverrides ? overrides : undefined,
-          override_reason: changedOverrides ? reason : undefined,
-        });
-      } else {
-        const result = await post<{ note: string }>('/admin/users', form);
-        toast(result.note, 'ok');
-      }
-      if (user) toast('Saved.', 'ok');
-      onSaved();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save that.');
-    }
-  };
-
-  return (
-    <Modal title={user ? user.name : 'Add somebody'} onClose={onClose} footer={
-      <>
-        <button class="btn" onClick={onClose}>Cancel</button>
-        <button class="btn btn-primary" onClick={save}>{user ? 'Save' : 'Add them'}</button>
-      </>
-    }>
-      {error && <div class="alert alert-error">{error}</div>}
-
-      {!user && (
-        <Field label="Email" hint="They set their own password from an invitation.">
-          <input type="email" value={form.email} autofocus
-                 onInput={(e) => set({ email: (e.target as HTMLInputElement).value })} />
-        </Field>
-      )}
-      <Field label="Name">
-        <input value={form.name}
-               onInput={(e) => set({ name: (e.target as HTMLInputElement).value })} />
-      </Field>
-      <Field label="Role">
-        <select value={form.role}
-                onChange={(e) => set({ role: (e.target as HTMLSelectElement).value })}>
-          {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{r.replace(/_/g, ' ')}</option>)}
-        </select>
-      </Field>
-      <div class="grid-2">
-        <Field label="Title"><input value={form.title}
-          onInput={(e) => set({ title: (e.target as HTMLInputElement).value })} /></Field>
-        <Field label="Mobile" hint="Used in email signatures.">
-          <input value={form.mobile_phone}
-                 onInput={(e) => set({ mobile_phone: (e.target as HTMLInputElement).value })} />
-        </Field>
-      </div>
-      <Field label="Licence number">
-        <input value={form.licence_number}
-               onInput={(e) => set({ licence_number: (e.target as HTMLInputElement).value })} />
-      </Field>
-
-      {user && (
-        <>
-          <label class="check">
-            <input type="checkbox" checked={form.active}
-                   onChange={(e) => set({ active: (e.target as HTMLInputElement).checked })} />
-            <span>
-              Active
-              <span class="text-sm text-muted d-block">
-                Deactivating signs them out everywhere. Their files stay assigned to them and
-                show up as unassigned work on the dashboard.
-              </span>
-            </span>
-          </label>
-
-          <button class="btn btn-sm" style={{ marginTop: 10 }}
-                  onClick={() => setShowOverrides(!showOverrides)}>
-            {showOverrides ? 'Hide' : 'Grant'} an exception to the role
-          </button>
-
-          {showOverrides && permissions && (
-            <>
-              <p class="text-sm text-muted" style={{ marginTop: 10 }}>
-                An exception overrides what the role allows, for this person only. It is
-                audited, and it should have an end in mind.
-              </p>
-              <div class="permission-list permission-pick">
-                {Object.entries(permissions).map(([key, label]) => (
-                  <label key={key} class="check">
-                    <input type="checkbox" checked={overrides[key] === true}
-                           onChange={(e) => {
-                             const next = { ...overrides };
-                             if ((e.target as HTMLInputElement).checked) next[key] = true;
-                             else delete next[key];
-                             setOverrides(next);
-                           }} />
-                    <span class="text-sm"><code>{key}</code> — {label}</span>
-                  </label>
-                ))}
-              </div>
-              {changedOverrides && (
-                <Field label="Why" hint="Recorded in the audit log. Say when it should end.">
-                  <input value={reason} placeholder="Covering the underwriter until 30 October"
-                         onInput={(e) => setReason((e.target as HTMLInputElement).value)} />
-                </Field>
-              )}
-            </>
-          )}
-        </>
-      )}
-    </Modal>
-  );
-}
+// People moved to the Staff page (pages/staff.tsx).
 
 // ── Templates ──────────────────────────────────────────────────────────────
 
@@ -1064,34 +894,26 @@ function ComplianceRulesSection({ canManage }: { canManage: boolean }) {
             {state.data.risk_factors.filter((f) => f.active).length} active factor(s)
           </span>
         </div>
-        <div class="table-wrap">
-          <table class="data">
-            <thead>
-              <tr><th>Factor</th><th>Weight</th><th>How it is decided</th><th>Version</th></tr>
-            </thead>
-            <tbody>
-              {state.data.risk_factors.map((f) => (
-                <tr key={`${f.model_version}-${f.factor_key}`}
-                    class={f.active ? '' : 'vocab-inactive'}>
-                  <td data-primary data-label="Factor">
-                    {f.label}
-                    {f.description && (
-                      <div class="text-sm text-muted">{f.description}</div>
-                    )}
-                  </td>
-                  <td data-label="Weight" class="num">{Number(f.weight)}</td>
-                  <td data-label="How it is decided">
-                    <code class="text-sm">{f.evaluator}</code>
-                    {Object.keys(f.parameters ?? {}).length > 0 && (
-                      <div class="text-sm text-muted">{JSON.stringify(f.parameters)}</div>
-                    )}
-                  </td>
-                  <td data-label="Version" class="num">v{f.model_version}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable label="Risk model" compact rows={state.data.risk_factors}
+          rowKey={(f) => `${f.model_version}-${f.factor_key}`}
+          rowClass={(f) => (f.active ? '' : 'vocab-inactive')}
+          columns={[
+            { key: 'label', header: 'Factor', primary: true,
+              render: (f) => <>{f.label}{f.description && <div class="text-sm text-muted">{f.description}</div>}</> },
+            { key: 'weight', header: 'Weight', filter: 'number', align: 'right', value: (f) => Number(f.weight) },
+            { key: 'evaluator', header: 'How it is decided', filter: 'auto',
+              render: (f) => (
+                <>
+                  <code class="text-sm">{f.evaluator}</code>
+                  {Object.keys(f.parameters ?? {}).length > 0 && (
+                    <div class="text-sm text-muted">{JSON.stringify(f.parameters)}</div>
+                  )}
+                </>
+              ) },
+            { key: 'active', header: 'Status', filter: 'auto', value: (f) => (f.active ? 'Active' : 'Inactive') },
+            { key: 'model_version', header: 'Version', filter: 'auto', align: 'right',
+              value: (f) => `v${f.model_version}` },
+          ]} />
         <div class="card-body text-sm text-muted">
           A factor's evaluator is one of a fixed set — {state.data.risk_evaluators.join(', ')} —
           because a rule engine that accepts expressions is one nobody can audit. Changing a

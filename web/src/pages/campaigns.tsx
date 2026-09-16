@@ -14,7 +14,7 @@
 import { useState } from 'preact/hooks';
 import { ApiError, formatDate, post, put, relativeTime } from '../lib/api.ts';
 import { navigate, toast, useAsync, useRoute, type Session } from '../lib/store.ts';
-import { Badge, Empty, ErrorNote, Field, Modal, Skeleton } from '../components/ui.tsx';
+import { Badge, Empty, ErrorNote, Field, Modal, Skeleton, SearchSelect} from '../components/ui.tsx';
 
 type Summary = {
   id: string; name: string; description: string | null; channel: string; purpose: string;
@@ -182,6 +182,7 @@ type Catalogue = {
   fields: Array<{ key: string; label: string; type: string; options?: string[]; help?: string }>;
   merge_fields: Array<{ name: string; label: string; example: string }>;
   stages: Array<{ key: string; label: string }>;
+  pipelines: Array<{ id: string; key: string; name: string; active: boolean }>;
   block_types: Array<{ type: string; label: string }>;
 };
 
@@ -674,17 +675,17 @@ function AudienceTab({ data, catalogue, id, session, onChanged }: {
                         <option key={op} value={op}>{label}</option>)}
                     </select>
                     {needsValue && (
-                      spec?.type === 'stage' ? (
-                        <select value={String(criterion.value ?? '')} disabled={sent}
-                                onChange={(e) => {
-                                  setCriteria(criteria.map((c, i) => (i === index
-                                    ? { ...c, value: (e.target as HTMLSelectElement).value } : c)));
-                                  setDirty(true);
-                                }}>
-                          <option value="">Choose…</option>
-                          {catalogue.stages.map((s) =>
-                            <option key={s.key} value={s.key}>{s.label}</option>)}
-                        </select>
+                      spec?.type === 'stage' || spec?.type === 'pipeline' ? (
+                        <div style={{ minWidth: 200 }}>
+                          <SearchSelect value={String(criterion.value ?? '')} disabled={sent} ariaLabel={spec.label}
+                                        options={spec.type === 'stage'
+                                          ? catalogue.stages.map((st) => ({ value: st.key, label: st.label }))
+                                          : catalogue.pipelines.map((pl) => ({ value: pl.key, label: pl.name }))}
+                                        onChange={(v) => {
+                                          setCriteria(criteria.map((c, i) => (i === index ? { ...c, value: v } : c)));
+                                          setDirty(true);
+                                        }} />
+                        </div>
                       ) : (
                         <input type={spec?.type === 'number' ? 'number' : 'text'} disabled={sent}
                                value={String(criterion.value ?? '')}

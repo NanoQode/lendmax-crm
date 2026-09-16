@@ -92,10 +92,57 @@ export async function api<T = unknown>(path: string, options: Options = {}): Pro
   return payload as T;
 }
 
+/**
+ * A multipart upload, for the one thing `api()` cannot carry: a file.
+ *
+ * The content-type is deliberately not set — the browser writes it, with the
+ * multipart boundary that a hand-written header always leaves out. Error
+ * handling is the server's sentence, as everywhere else.
+ */
+export async function upload<T = unknown>(
+  path: string, form: FormData, signal?: AbortSignal, method: 'POST' | 'PUT' = 'POST',
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}/api${path}`, {
+      method, credentials: 'same-origin', body: form, signal,
+    });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw err;
+    throw new ApiError('Could not reach the server. Check your connection and try again.', 0, 'network_error');
+  }
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = (await response.json()) as Record<string, unknown>;
+  } catch {
+    if (response.ok) return {} as T;
+  }
+  if (!response.ok || payload.ok === false) {
+    if (response.status === 401) onUnauthenticated?.();
+    // Multer rejects an oversized file before any of our code runs, and its
+    // message ("File too large") says nothing about the limit.
+    const message = (payload.error as string)
+      ?? (response.status === 413 ? 'That file is too large.' : `Upload failed (${response.status}).`);
+    throw new ApiError(message, response.status, (payload.code as string) ?? 'error', payload);
+  }
+  return payload as T;
+}
+
 export const get = <T>(path: string, signal?: AbortSignal) => api<T>(path, { signal });
 export const post = <T>(path: string, body?: unknown) => api<T>(path, { method: 'POST', body });
 export const put = <T>(path: string, body?: unknown) => api<T>(path, { method: 'PUT', body });
 export const patch = <T>(path: string, body?: unknown) => api<T>(path, { method: 'PATCH', body });
+export const del = <T>(path: string, body?: unknown) => api<T>(path, { method: 'DELETE', body });
+
+/** Field errors from a refusal, keyed by field, ready to put under the inputs. */
+export function fieldErrors(err: unknown, fallback: string): Record<string, string> {
+  if (err instanceof ApiError && err.fields?.length) {
+    const out: Record<string, string> = {};
+    for (const f of err.fields) if (!out[f.field]) out[f.field] = f.message;
+    return out;
+  }
+  return { _: err instanceof Error ? err.message : fallback };
+}
 
 // ── Formatting ─────────────────────────────────────────────────────────────
 

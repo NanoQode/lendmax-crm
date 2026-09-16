@@ -1,8 +1,7 @@
 /** Automation handlers: advancing an enrollment, and draining the event bus. */
 import { queryOne } from '../../db/pool.ts';
 import { registerHandler } from '../worker.ts';
-import { enqueue } from '../queue.ts';
-import { processEvents, runStep, sweepDueEnrollments } from '../../services/automation-engine.ts';
+import { emitTimeEvents, processEvents, runStep, sweepDueEnrollments } from '../../services/automation-engine.ts';
 
 export function registerAutomationHandlers(): void {
   registerHandler('automation.step', async (job) => {
@@ -19,23 +18,22 @@ export function registerAutomationHandlers(): void {
   /**
    * Drain the event bus.
    *
-   * Rescheduled by the handler rather than run on a timer, so there is exactly
-   * one of it however many workers are running — the queue's dedupe key is
-   * what enforces that.
+   * Rescheduled through the worker (`rerunAt`) rather than run on a timer, so
+   * there is exactly one of it however many workers are running — the
+   * queue's dedupe key is what enforces that.
    */
   registerHandler('automation.tick', async (job) => {
     const organizationId = job.organization_id
       ?? (await queryOne<{ id: string }>('SELECT id FROM organizations ORDER BY created_at LIMIT 1'))?.id;
     if (!organizationId) return;
 
+    // The triggers nobody causes — dates and quiet spells — become events first,
+    // so the same pass enrols them.
+    await emitTimeEvents(organizationId);
     await processEvents(organizationId);
     // And pick up anything whose job went missing.
     await sweepDueEnrollments(organizationId);
 
-    await enqueue('automation.tick', {}, {
-      organizationId,
-      runAfter: new Date(Date.now() + 30_000),
-      dedupeKey: 'automation.tick',
-    });
+    return { rerunAt: new Date(Date.now() + 30_000) };
   });
 }

@@ -37,8 +37,27 @@ Three rules follow, and they are enforced in code rather than by convention:
 1. **One portal application is exactly one `applications` row**, keyed on
    `portal_reference` (`LMX-A-YYYYMM-NNNN`), which carries a `UNIQUE`
    constraint. There is no path that creates a second.
-2. **The CRM never edits a portal-owned field.** Everything in section 3 below
-   is replaced wholesale by a newer push; nothing here writes back.
+2. **The client owns the answer, the brokerage owns the correction, and the
+   correction wins.** *(Changed 2026-09-16. It previously read "the CRM never
+   edits a portal-owned field", which cost a broker their fix to the next
+   mirror push thirty seconds later.)*
+
+   `portal_data` is still replaced wholesale by a newer push and is still never
+   written to from here — what the client said is always recoverable. A staff
+   correction is recorded in `application_field_edits` against the path it
+   changed and laid over the portal's copy on every read.
+
+   A **scalar is pinned by itself** (`property.postal_code`), so correcting one
+   field does not freeze the forty beside it. A **list is pinned as a list**
+   (`liabilities`), because rows have no stable identity across a client's own
+   edits and pinning per row would silently reattach a correction to a
+   different debt.
+
+   The derived columns in section 3 are recomputed from the merged view after a
+   correction *and* after every push (`services/applications.ts`,
+   `applyAnswerColumns`), so the board and the reports agree with what the file
+   shows. Removing the last correction puts the field back under the portal's
+   control.
 3. **A ratio is never recomputed.** The portal calculates GDS/TDS once and
    records its own working — every income, shelter and debt line with the note
    that explains it. Those line items travel in `portal_ratios` and are
@@ -230,6 +249,31 @@ client does not fill in.
 `commission_records`, `compliance_cases`, `renewal_records`.
 
 ---
+
+## 4a. The form itself
+
+The CRM renders the client's answers from the portal's own form definition
+rather than a second description of it. `vendor/portal-schema.js` is a
+byte-identical copy of `/srv/lendmax-portal/lib/schema.js`;
+`scripts/vendor-portal-schema.mjs` calls its `publicSchema()` and writes
+`src/integrations/portal-schema.ts`. The conditions (`shown_when`) and the
+validators are ported in `domain/application-form.ts`, word for word from the
+portal's `lib/validate.js`, so a value the portal would refuse is refused here
+with the same sentence.
+
+To refresh after the portal changes:
+
+```
+scp the portal's lib/schema.js over vendor/portal-schema.js
+node scripts/vendor-portal-schema.mjs
+npm test          # test/application-form.test.ts says what changed
+```
+
+One deliberate difference from the portal: a staff member saves a section
+`partial`, so a broker fixing one wrong postal code on a half-finished file is
+not made to answer the other forty questions first. What they type must be
+*valid*; the section does not have to be *complete*. Completeness is the
+client's business and the portal's bar.
 
 ## 5. What still has to be built for this map to run
 

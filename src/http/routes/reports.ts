@@ -86,6 +86,7 @@ reportRoutes.get(
             ${assignmentFilter}
        )
        SELECT s.stage_key, COALESCE(ps.label, s.stage_key) AS label,
+              COALESCE(pl.name, '—') AS pipeline_name,
               count(DISTINCT s.application_id)::int AS files,
               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY s.days)::numeric, 1)::text
                 AS median_days,
@@ -94,8 +95,9 @@ reportRoutes.get(
          FROM spans s
          LEFT JOIN pipeline_stages ps
                 ON ps.organization_id = $1 AND ps.key = s.stage_key
-        GROUP BY s.stage_key, ps.label, ps.position
-        ORDER BY ps.position NULLS LAST`,
+         LEFT JOIN pipelines pl ON pl.id = ps.pipeline_id
+        GROUP BY s.stage_key, ps.label, ps.position, pl.name, pl.position
+        ORDER BY pl.position NULLS LAST, ps.position NULLS LAST`,
       params);
 
     // The funnel: how many files ever reached each stage, not how many are

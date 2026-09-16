@@ -401,6 +401,11 @@ async function ensureOrganization(): Promise<string> {
  * "Underwriting Team" is a persona on that mailbox, not a separate human, and
  * the tone-rotation templates sign as the team rather than inventing a person.
  */
+const splitName = (name: string): [string, string | null] => {
+  const [first, ...rest] = name.trim().split(/\s+/);
+  return [first ?? name, rest.join(' ') || null];
+};
+
 async function seedStaff(orgId: string): Promise<Record<string, string>> {
   const staff = [
     { email: 'michael@lendmax.ca', name: 'Michael Squeo', role: 'manager' },
@@ -409,12 +414,14 @@ async function seedStaff(orgId: string): Promise<Record<string, string>> {
   const ids: Record<string, string> = {};
   for (const person of staff) {
     const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO users (organization_id, email, name, role, active, profile_complete)
-       VALUES ($1,$2,$3,$4,true,false)
-       ON CONFLICT (organization_id, lower(email))
+      // Not activated: they get in by an invitation from the Staff screen.
+      `INSERT INTO users (organization_id, email, name, first_name, last_name, role, active,
+                          profile_complete)
+       VALUES ($1,$2,$3,$5,$6,$4,true,false)
+       ON CONFLICT (organization_id, lower(email)) WHERE archived_at IS NULL
        DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role, active = true
        RETURNING id`,
-      [orgId, person.email, person.name, person.role],
+      [orgId, person.email, person.name, person.role, ...splitName(person.name)],
     );
     ids[person.role] = rows[0]!.id;
   }
@@ -707,10 +714,14 @@ async function main(): Promise<void> {
   if (adminEmail) {
     password = randomUUID().replace(/-/g, '').slice(0, 20);
     await pool.query(
-      `INSERT INTO users (organization_id, email, name, role, password_hash, active, profile_complete)
-       VALUES ($1,$2,$3,'technical_admin',$4,true,false)
-       ON CONFLICT (organization_id, lower(email))
+      // Activated here: the person running the seed on the server is the one
+      // who reads the password, so there is no mailbox to prove.
+      `INSERT INTO users (organization_id, email, name, first_name, role, password_hash, active,
+                          profile_complete, activated_at)
+       VALUES ($1,$2,$3,$3,'technical_admin',$4,true,false,now())
+       ON CONFLICT (organization_id, lower(email)) WHERE archived_at IS NULL
        DO UPDATE SET password_hash = EXCLUDED.password_hash, active = true,
+                     activated_at = COALESCE(users.activated_at, now()),
                      failed_login_count = 0, locked_until = NULL`,
       [orgId, adminEmail, adminEmail.split('@')[0], await hashPassword(password)],
     );
@@ -720,9 +731,10 @@ async function main(): Promise<void> {
 
   if (wantsDemo) {
     const broker = await pool.query<{ id: string }>(
-      `INSERT INTO users (organization_id, email, name, role, active, profile_complete)
-       VALUES ($1,'broker@lendmax.ca','Demo Broker','broker',true,true)
-       ON CONFLICT (organization_id, lower(email)) DO UPDATE SET active = true
+      `INSERT INTO users (organization_id, email, name, first_name, last_name, role, active,
+                          profile_complete)
+       VALUES ($1,'broker@lendmax.ca','Demo Broker','Demo','Broker','broker',true,true)
+       ON CONFLICT (organization_id, lower(email)) WHERE archived_at IS NULL DO UPDATE SET active = true
        RETURNING id`,
       [orgId],
     );

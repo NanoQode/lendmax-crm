@@ -15,6 +15,8 @@ import { useState } from 'preact/hooks';
 import { ApiError, formatDate, formatDateTime, money, post, put, relativeTime } from '../lib/api.ts';
 import { navigate, toast, useAsync, type Session } from '../lib/store.ts';
 import { Badge, Empty, ErrorNote, Field, Modal, Skeleton } from '../components/ui.tsx';
+import { DataTable } from '../components/data-table.tsx';
+import { ApplicationForm } from './application-form.tsx';
 
 type ChecklistItem = {
   id: string; item_key: string; group_key: string | null; label: string;
@@ -92,6 +94,8 @@ export function ComplianceTab({ applicationId, session }: {
 
   return (
     <div class="stack">
+      <CollectedCard applicationId={applicationId} session={session} />
+
       <div class="grid-2" style={{ alignItems: 'start' }}>
         <RiskMeter risk={data.risk} applicationId={applicationId} session={session}
                    onChanged={state.reload} />
@@ -181,6 +185,156 @@ export function ComplianceTab({ applicationId, session }: {
                       onClose={() => setDeciding(false)}
                       onDecided={() => { setDeciding(false); state.reload(); }} />
       )}
+    </div>
+  );
+}
+
+// ── What we have from the client ───────────────────────────────────────────
+
+type Collected = {
+  contact: { name: string | null; email: string | null; phone: string | null; date_of_birth: string | null;
+             address: string | null; lead_source: string | null };
+  application: { reference: string | null; percent_complete: number | null; started_at: string;
+                 submitted_at: string | null };
+  sections: Array<{ id: string; title: string; state: 'complete' | 'declared' | 'started' | 'not_started' | 'hidden';
+                    entries: number | null; missing: number | null }>;
+  hidden_reason: string | null;
+  documents: Array<{ id: string; label: string; category_key: string | null; source: string;
+                     review_status: string; uploaded_at: string }>;
+  consents: Array<{ channel: string; purpose: string; basis: string; granted: boolean;
+                    source: string | null; collected_at: string; consent_version: string | null }>;
+  identities: number;
+  totals: { collected: number; outstanding: number };
+};
+
+const SECTION_STATE: Record<Collected['sections'][number]['state'], { label: string; tone: 'ok' | 'warn' | 'neutral' | 'danger' }> = {
+  complete: { label: 'Collected', tone: 'ok' },
+  declared: { label: 'Declared none', tone: 'ok' },
+  started: { label: 'Partly filled', tone: 'warn' },
+  not_started: { label: 'Not yet', tone: 'danger' },
+  hidden: { label: 'On file · restricted', tone: 'neutral' },
+};
+
+const DOC_STATUS: Record<string, 'ok' | 'warn' | 'danger' | 'neutral'> = {
+  accepted: 'ok', pending: 'warn', rejected: 'danger',
+};
+
+/**
+ * Everything collected from the client so far, before any judgement about it:
+ * who they are, each part of the application and whether it is in, the
+ * documents they sent, what they consented to, and whether ID was checked.
+ * The full answers open underneath, read-only.
+ */
+function CollectedCard({ applicationId, session }: { applicationId: string; session: Session }) {
+  const state = useAsync<Collected>(`/applications/${applicationId}/compliance/collected`, [applicationId]);
+  const [showAnswers, setShowAnswers] = useState(false);
+
+  if (state.status === 'loading') return <div class="card"><Skeleton rows={4} height={40} /></div>;
+  if (state.status === 'error') {
+    return <div class="card"><div class="card-body">
+      <ErrorNote error={state.error} code={state.code} permission={state.permission} onRetry={state.reload} />
+    </div></div>;
+  }
+  const c = state.data;
+  const dash = (v: string | null | undefined) => v || '—';
+
+  return (
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Collected from the client</h2>
+          <p class="text-sm text-muted" style={{ margin: '3px 0 0' }}>
+            {c.totals.collected} of {c.totals.collected + c.totals.outstanding} application sections in
+            {' · '}{c.documents.length} document{c.documents.length === 1 ? '' : 's'}
+            {' · '}{c.consents.filter((x) => x.granted).length} consent{c.consents.filter((x) => x.granted).length === 1 ? '' : 's'} given
+            {' · '}{c.identities ? `ID checked (${c.identities})` : 'ID not checked'}
+          </p>
+        </div>
+        <Badge tone={c.application.submitted_at ? 'ok' : 'warn'}>
+          {c.application.submitted_at ? `Submitted ${formatDate(c.application.submitted_at)}` : 'Not submitted'}
+        </Badge>
+      </div>
+
+      <div class="card-body stack">
+        <div class="collected-grid">
+          <div>
+            <h3 class="app-group-title">The client</h3>
+            <dl class="collected-dl">
+              <dt>Name</dt><dd>{dash(c.contact.name)}</dd>
+              <dt>Email</dt><dd>{dash(c.contact.email)}</dd>
+              <dt>Phone</dt><dd>{dash(c.contact.phone)}</dd>
+              <dt>Date of birth</dt><dd>{c.contact.date_of_birth ? formatDate(c.contact.date_of_birth) : '—'}</dd>
+              <dt>Address</dt><dd>{dash(c.contact.address)}</dd>
+              <dt>Came from</dt><dd>{dash(c.contact.lead_source)}</dd>
+              <dt>Application</dt>
+              <dd>
+                {c.application.reference ?? '—'}
+                {c.application.percent_complete !== null ? ` · ${c.application.percent_complete}% complete` : ''}
+                {` · started ${formatDate(c.application.started_at)}`}
+              </dd>
+            </dl>
+          </div>
+
+          <div>
+            <h3 class="app-group-title">The application</h3>
+            <ul class="collected-list">
+              {c.sections.map((s) => (
+                <li key={s.id}>
+                  <span>
+                    {s.title}{s.entries ? <span class="text-muted"> · {s.entries}</span> : null}
+                    {s.missing ? <span class="text-muted text-sm"> · {s.missing} answer{s.missing === 1 ? '' : 's'} missing</span> : null}
+                  </span>
+                  <Badge tone={SECTION_STATE[s.state].tone}>{SECTION_STATE[s.state].label}</Badge>
+                </li>
+              ))}
+            </ul>
+            {c.hidden_reason && <p class="text-sm text-muted mb-0">{c.hidden_reason}</p>}
+          </div>
+        </div>
+
+        <div class="collected-grid">
+          <div>
+            <h3 class="app-group-title">Documents</h3>
+            {c.documents.length === 0 ? <p class="text-sm text-muted">Nothing received yet.</p> : (
+              <ul class="collected-list">
+                {c.documents.map((d) => (
+                  <li key={d.id}>
+                    <span>
+                      {d.label}
+                      <span class="text-muted text-sm"> · {d.source.replace(/_/g, ' ')} · {formatDate(d.uploaded_at)}</span>
+                    </span>
+                    <Badge tone={DOC_STATUS[d.review_status] ?? 'neutral'}>{d.review_status}</Badge>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div>
+            <h3 class="app-group-title">Consent</h3>
+            {c.consents.length === 0 ? <p class="text-sm text-muted">No consent on record.</p> : (
+              <ul class="collected-list">
+                {c.consents.map((x) => (
+                  <li key={`${x.channel}-${x.purpose}`}>
+                    <span>
+                      {x.purpose.replace(/_/g, ' ')} · {x.channel}
+                      <span class="text-muted text-sm"> · {x.basis}{x.source ? `, ${x.source.replace(/_/g, ' ')}` : ''} · {formatDate(x.collected_at)}</span>
+                    </span>
+                    <Badge tone={x.granted ? 'ok' : 'danger'}>{x.granted ? 'Given' : 'Withdrawn'}</Badge>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <button class="btn btn-sm" onClick={() => setShowAnswers(!showAnswers)}>
+            {showAnswers ? 'Hide the answers' : 'Show every answer'}
+          </button>
+        </div>
+        {showAnswers && <ApplicationForm id={applicationId} session={session} readOnly />}
+      </div>
     </div>
   );
 }
@@ -591,21 +745,15 @@ function SuitabilityCard({ data, onEdit }: { data: Payload; onEdit: () => void }
             {Array.isArray(s.products_considered) && s.products_considered.length > 0 && (
               <>
                 <h3 class="sub-heading">Products considered</h3>
-                <div class="table-wrap">
-                  <table class="data">
-                    <thead><tr><th>Lender</th><th>Product</th><th>Rate</th><th>Why not</th></tr></thead>
-                    <tbody>
-                      {(s.products_considered as Array<Record<string, string>>).map((p, i) => (
-                        <tr key={i}>
-                          <td data-label="Lender">{p.lender ?? '—'}</td>
-                          <td data-label="Product">{p.product ?? '—'}</td>
-                          <td data-label="Rate">{p.rate ?? '—'}</td>
-                          <td data-label="Why not">{p.why_not ?? '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <DataTable label="Products considered" compact
+                  rows={s.products_considered as Array<Record<string, string>>}
+                  rowKey={(p) => `${p.lender}-${p.product}-${p.rate}`}
+                  columns={[
+                    { key: 'lender', header: 'Lender', primary: true, filter: 'auto', render: (p) => p.lender ?? '—' },
+                    { key: 'product', header: 'Product', render: (p) => p.product ?? '—' },
+                    { key: 'rate', header: 'Rate', filter: 'number', render: (p) => p.rate ?? '—' },
+                    { key: 'why_not', header: 'Why not', render: (p) => p.why_not ?? '—' },
+                  ]} />
               </>
             )}
             <div class="text-sm text-subtle">

@@ -25,6 +25,7 @@ import {
 import { todayIn } from '../../domain/dates.ts';
 import { env } from '../../config/env.ts';
 import { commissionPayoutBlockers } from '../../services/compliance.ts';
+import { getCommissionSplit, setCommissionSplit } from '../../services/commission-split.ts';
 
 export const fundingRoutes: Router = Router();
 fundingRoutes.use(requireAuth);
@@ -90,8 +91,20 @@ fundingRoutes.get(
          FROM renewal_records r LEFT JOIN users u ON u.id = r.assigned_to
         WHERE r.application_id = $1 ORDER BY r.created_at DESC LIMIT 1`, [applicationId]);
 
+    // What the staff member on this file makes, beside what the brokerage
+    // keeps: the admin's split, and the person it applies to. Only sent to
+    // somebody who may see commission.
+    const staff = showCommission
+      ? await queryOne<{ user_id: string; name: string }>(
+        `SELECT a.user_id, u.name FROM assignments a JOIN users u ON u.id = a.user_id
+          WHERE a.application_id = $1 AND a.role = 'broker' AND a.unassigned_at IS NULL
+          ORDER BY a.is_primary DESC, a.assigned_at LIMIT 1`, [applicationId])
+      : null;
+
     res.json({
       funding,
+      split_policy: showCommission ? await getCommissionSplit(user.organization_id) : null,
+      file_staff: staff,
       submissions: submissions.rows,
       lenders: lenders.rows,
       commissions: commissions.rows.map((c) => {
@@ -108,6 +121,39 @@ fundingRoutes.get(
       can_edit: can(user, 'funding.edit'),
       can_edit_commission: can(user, 'commission.edit'),
     });
+  }),
+);
+
+// ── The staff / brokerage split ────────────────────────────────────────────
+
+fundingRoutes.get(
+  '/admin/commission-split',
+  requirePermission('commission.view'),
+  asyncRoute(async (req, res) => {
+    res.json({ ok: true, split: await getCommissionSplit(req.user!.organization_id) });
+  }),
+);
+
+fundingRoutes.put(
+  '/admin/commission-split',
+  requirePermission('commission.edit'),
+  asyncRoute(async (req, res) => {
+    const user = req.user!;
+    const body = z.object({ staff_percent: z.number().min(0).max(100) }).parse(req.body);
+    const before = await getCommissionSplit(user.organization_id);
+    await setCommissionSplit(user.organization_id, user.id, body.staff_percent);
+    const split = await getCommissionSplit(user.organization_id);
+    await recordAudit({
+      organizationId: user.organization_id,
+      actor: { userId: user.id, name: user.name, role: user.role, ip: req.ip },
+      action: 'settings.commission_split',
+      entityType: 'setting',
+      summary: `Commission split changed from ${before.staff_percent}/${before.brokerage_percent} `
+        + `to ${split.staff_percent}/${split.brokerage_percent} (staff/brokerage)`,
+      before: { staff_percent: before.staff_percent, brokerage_percent: before.brokerage_percent },
+      after: { staff_percent: split.staff_percent, brokerage_percent: split.brokerage_percent },
+    });
+    res.json({ ok: true, split });
   }),
 );
 
@@ -166,7 +212,7 @@ fundingRoutes.put(
     // permission, not an edit that happens to go through.
     if (existing?.confirmed && !can(user, 'commission.edit')) {
       throw new AppError(
-        'This funding is confirmed. A manager can amend it.', 403, 'confirmed');
+        'This funding is confirmed. An admin can amend it.', 403, 'confirmed');
     }
 
     const problems = fundingProblems(body);
@@ -340,10 +386,13 @@ fundingRoutes.post(
 
       // The file is funded. The stage machine's own rules do not apply here:
       // this IS the event they gate on.
+      // The won stage of the file's own pipeline — a funded renewal stays in
+      // the renewals pipeline rather than jumping into another one's Funded.
       const stage = await client.query<{ key: string }>(
-        `SELECT key FROM pipeline_stages
-          WHERE organization_id = $1 AND category = 'won' AND active
-          ORDER BY position LIMIT 1`, [user.organization_id]);
+        `SELECT s.key FROM pipeline_stages s
+          WHERE s.organization_id = $1 AND s.category = 'won' AND s.active AND s.archived_at IS NULL
+            AND s.pipeline_id = (SELECT pipeline_id FROM applications WHERE id = $2)
+          ORDER BY s.position LIMIT 1`, [user.organization_id, applicationId]);
       if (stage.rows[0]) {
         const previous = await client.query<{ stage_key: string }>(
           `SELECT stage_key FROM applications WHERE id = $1`, [applicationId]);
@@ -663,7 +712,7 @@ fundingRoutes.get(
       totals,
       scope: restricted ? 'mine' : q.mine ? 'mine' : 'all',
       scope_reason: restricted
-        ? 'You are seeing the files you are paid on. A manager sees the brokerage.'
+        ? 'You are seeing the files you are paid on. An admin sees the brokerage.'
         : null,
     });
   }),

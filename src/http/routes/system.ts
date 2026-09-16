@@ -140,8 +140,12 @@ systemRoutes.get(
     const user = req.user!;
     const [stages, types, dispositions, categories, users, lenders] = await Promise.all([
       query(
-        `SELECT key, label, position, category, probability, colour, entry_rules, active
-           FROM pipeline_stages WHERE organization_id = $1 ORDER BY position`,
+        // Every stage not deleted, with its pipeline, default pipeline first.
+        `SELECT s.key, s.label, s.position, s.category, s.probability, s.colour, s.entry_rules, s.active,
+                s.pipeline_id, p.name AS pipeline_name, p.active AS pipeline_active
+           FROM pipeline_stages s JOIN pipelines p ON p.id = s.pipeline_id
+          WHERE s.organization_id = $1 AND s.archived_at IS NULL AND p.archived_at IS NULL
+          ORDER BY p.is_default DESC, p.position, s.position`,
         [user.organization_id],
       ),
       query(
@@ -160,8 +164,10 @@ systemRoutes.get(
         [user.organization_id],
       ),
       query(
+        // Everyone a dropdown may offer: active, activated, not deleted.
         `SELECT id, name, email, role FROM users
-          WHERE organization_id = $1 AND active ORDER BY name`,
+          WHERE organization_id = $1 AND active AND activated_at IS NOT NULL
+            AND archived_at IS NULL ORDER BY name`,
         [user.organization_id],
       ),
       query(
@@ -174,6 +180,13 @@ systemRoutes.get(
     res.json({
       ok: true,
       stages: stages.rows,
+      pipelines: (await query(
+        `SELECT p.id, p.key, p.name, p.active, p.is_default,
+                COALESCE(array_agg(pp.purpose) FILTER (WHERE pp.purpose IS NOT NULL), '{}') AS purposes
+           FROM pipelines p LEFT JOIN pipeline_purposes pp ON pp.pipeline_id = p.id
+          WHERE p.organization_id = $1 AND p.archived_at IS NULL
+          GROUP BY p.id ORDER BY p.is_default DESC, p.position, lower(p.name)`,
+        [user.organization_id])).rows,
       transaction_types: types.rows,
       lost_dispositions: dispositions.rows,
       document_categories: categories.rows,
@@ -185,7 +198,7 @@ systemRoutes.get(
   }),
 );
 
-/** The permission catalogue, for the Settings → Users screen. */
+/** The permission catalogue. The staff form uses /staff/meta, which groups it by module. */
 systemRoutes.get(
   '/permissions',
   requirePermission('user.view'),

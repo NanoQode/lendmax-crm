@@ -122,7 +122,11 @@ export async function gateFor(
   const [consents, suppressions] = await Promise.all([
     query<ConsentRecord>(
       `SELECT channel, purpose, basis, granted, collected_at, expires_at
-         FROM consents WHERE customer_id = $1`,
+         FROM consents
+        -- A merged record's consents stay on it (the table is append-only) and
+        -- count for the customer it was merged into.
+        WHERE customer_id = $1
+           OR customer_id IN (SELECT id FROM customers WHERE merged_into_id = $1)`,
       [customerId],
     ),
     query<SuppressionRecord>(

@@ -9,6 +9,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { resolveSession, type SessionUser } from '../../services/auth.ts';
 import { can, denialMessage, permissionsFor, type Permission } from '../../domain/permissions.ts';
+import type { Actor } from '../../services/staff.ts';
 
 export const SESSION_COOKIE = 'lmx_crm_session';
 
@@ -91,4 +92,13 @@ export function requirePermission(permission: Permission) {
 /** The permission set the client uses to decide what to render. */
 export function permissionsOf(user: SessionUser): string[] {
   return [...permissionsFor(user)];
+}
+
+/** The signed-in person, in the shape the services take. */
+export function actorOf(req: Request): Actor {
+  const u = req.user!;
+  return {
+    organizationId: u.organization_id, kind: 'user', userId: u.id,
+    name: u.name, role: u.role, ip: req.ip ?? null,
+  };
 }

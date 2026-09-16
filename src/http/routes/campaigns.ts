@@ -33,6 +33,8 @@ import { MERGE_FIELDS, renderTemplate, validateTemplate } from '../../domain/mer
 import { calculatorMergeValues } from '../../services/link-tracking.ts';
 import { enqueue } from '../../jobs/queue.ts';
 import { env } from '../../config/env.ts';
+import { signatureFor } from '../../services/signature.ts';
+import { pipelineOptions } from '../../services/pipelines.ts';
 
 export const campaignRoutes: Router = Router();
 campaignRoutes.use(requireAuth);
@@ -105,13 +107,12 @@ campaignRoutes.get(
   requirePermission('campaign.view'),
   asyncRoute(async (req, res) => {
     const user = req.user!;
-    const stages = await query(
-      `SELECT key, label FROM pipeline_stages WHERE organization_id = $1 AND active
-        ORDER BY position`, [user.organization_id]);
+    const { pipelines, stages } = await pipelineOptions(user.organization_id);
     res.json({
       fields: Object.entries(SEGMENT_FIELDS).map(([key, spec]) => ({ key, ...spec, sql: undefined })),
       merge_fields: MERGE_FIELDS,
-      stages: stages.rows,
+      stages,
+      pipelines,
       block_types: [
         { type: 'heading', label: 'Heading' },
         { type: 'text', label: 'Paragraph' },
@@ -361,8 +362,9 @@ function exampleValues(): Record<string, unknown> {
 async function mergeValuesFor(
   organizationId: string,
   customerId: string,
-  user: { name: string; email: string },
+  user: { id?: string; name: string; email: string },
 ): Promise<Record<string, unknown>> {
+  const signature = await signatureFor(user.id);
   const row = await queryOne<Record<string, unknown>>(
     `SELECT c.first_name, c.last_name,
             app.portal_reference, app.amount_requested, app.transaction_type_key,
@@ -387,6 +389,8 @@ async function mergeValuesFor(
     ...(row ?? {}),
     user_name: user.name,
     user_first_name: user.name.split(' ')[0],
+    signature: signature?.text ?? null,
+    user_signature_html: signature?.html ?? null,
     ...calculatorMergeValues(organizationId, customerId, row?.transaction_type_key),
   };
 }

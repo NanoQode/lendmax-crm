@@ -145,8 +145,10 @@ export async function gatherEvidence(
        (SELECT count(DISTINCT iv.applicant_id)::int FROM identity_verifications iv
          WHERE iv.application_id = $1 AND iv.status = 'verified') AS identities_verified,
        EXISTS (SELECT 1 FROM consents c
-                JOIN applications app ON app.customer_id = c.customer_id
-               WHERE app.id = $1 AND c.granted AND c.basis <> 'withdrawn') AS consent_recorded,
+                JOIN applications app ON app.id = $1
+               WHERE (c.customer_id = app.customer_id
+                      OR c.customer_id IN (SELECT m.id FROM customers m WHERE m.merged_into_id = app.customer_id))
+                 AND c.granted AND c.basis <> 'withdrawn') AS consent_recorded,
        (SELECT count(*)::int FROM lender_conditions lc WHERE lc.application_id = $1)
          AS conditions_total,
        (SELECT count(*)::int FROM lender_conditions lc

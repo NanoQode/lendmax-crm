@@ -31,6 +31,26 @@ import { gateFor, send } from '../../services/messaging.ts';
 import { renderTemplate, validateTemplate } from '../../domain/merge-fields.ts';
 import { calculatorMergeValues } from '../../services/link-tracking.ts';
 import { measureSegments } from '../../integrations/voipms.ts';
+import { textToHtml } from '../../domain/signature.ts';
+import { signatureFor } from '../../services/signature.ts';
+
+/**
+ * The sender's signature under an email, unless they turned it off for this
+ * one or already placed {signature} in the body themselves. Texts never get
+ * one: a signature costs a text message its second segment.
+ */
+async function withSignature(
+  channel: 'email' | 'sms', include: boolean, source: string, bodyText: string, userId: string,
+): Promise<{ text: string; html?: string; signature: { text: string; html: string } | null }> {
+  if (channel !== 'email') return { text: bodyText, signature: null };
+  const placed = source.includes('{signature}');
+  const sig = include && !placed ? await signatureFor(userId) : null;
+  return {
+    text: sig ? `${bodyText}\n\n${sig.text}` : bodyText,
+    html: textToHtml(bodyText) + (sig?.html ?? ''),
+    signature: sig,
+  };
+}
 
 export const messageRoutes: Router = Router();
 messageRoutes.use(requireAuth);
@@ -123,6 +143,7 @@ messageRoutes.post(
       application_id: z.string().uuid().nullable().optional(),
       template_key: z.string().optional(),
       urgent: z.boolean().default(false),
+      include_signature: z.boolean().default(true),
     }).parse(req.body);
 
     const customer = await queryOne<{ id: string; first_name: string; last_name: string }>(
@@ -162,6 +183,9 @@ messageRoutes.post(
         400, 'nothing_to_send', subject.missing);
     }
 
+    const signed = await withSignature(body.channel, body.include_signature, body.body_text,
+                                       rendered.text, user.id);
+
     const outcome = await send({
       organizationId: user.organization_id,
       customerId,
@@ -169,7 +193,8 @@ messageRoutes.post(
       channel: body.channel,
       purpose: body.purpose,
       subject: subject?.text,
-      bodyText: rendered.text,
+      bodyText: signed.text,
+      bodyHtml: signed.html,
       origin: 'manual',
       sentBy: user.id,
       templateKey: body.template_key ?? null,
@@ -213,15 +238,20 @@ messageRoutes.post(
       subject: z.string().optional(),
       body_text: z.string(),
       application_id: z.string().uuid().nullable().optional(),
+      include_signature: z.boolean().default(true),
     }).parse(req.body);
 
     const values = await mergeValues(user.organization_id, String(req.params.id),
                                      body.application_id ?? null, user);
     const rendered = renderTemplate(body.body_text, { values });
     const subject = body.subject ? renderTemplate(body.subject, { values }) : null;
+    const signed = await withSignature(body.channel, body.include_signature, body.body_text,
+                                       rendered.text, user.id);
 
     res.json({
-      text: rendered.text,
+      text: signed.text,
+      html: signed.html ?? null,
+      signature: signed.signature,
       subject: subject?.text ?? null,
       missing: [...new Set([...rendered.missing, ...(subject?.missing ?? [])])],
       dropped: rendered.dropped,
@@ -335,6 +365,7 @@ async function mergeValues(
   return {
     ...(row ?? {}),
     user_first_name: String(row?.user_name ?? user.name).split(' ')[0],
+    signature: (await signatureFor(user.id))?.text ?? null,
     ...calculatorMergeValues(organizationId, customerId, row?.transaction_type_key),
   };
 }

@@ -28,8 +28,10 @@ import { env } from '../../config/env.ts';
 import { log } from '../../lib/logger.ts';
 import { checkUpload, putObject, scanObject, MAX_BYTES } from '../../services/storage.ts';
 import { recordAudit, recordAuditSafely } from '../../services/audit.ts';
+import { emitEvent } from '../../services/events.ts';
 import { verifyTrackedLink } from '../../services/link-tracking.ts';
 import { findCalculator } from '../../domain/calculators.ts';
+import { describeFormats, fileMatchesFormats } from '../../domain/required-documents.ts';
 import { verifyUnsubscribeToken } from '../../services/unsubscribe.ts';
 import { asyncRoute } from '../middleware/errors.ts';
 import { markItemReceived, refreshOutstanding } from './documents.ts';
@@ -123,7 +125,7 @@ publicRoutes.get(
     );
 
     const { rows: items } = await query(
-      `SELECT i.id, i.label, i.description, i.required, i.status,
+      `SELECT i.id, i.label, i.description, i.required, i.status, i.formats,
               COALESCE(a.first_name, '') AS applicant_first_name
          FROM document_request_items i
          LEFT JOIN application_applicants a ON a.id = i.applicant_id
@@ -139,7 +141,8 @@ publicRoutes.get(
       requested_by: request.requested_by_name,
       message: request.message,
       completed: request.status === 'completed',
-      items,
+      // What each item accepts, in words, where the checklist set formats.
+      items: items.map((i) => ({ ...i, formats_label: i.formats?.length ? describeFormats(i.formats) : null })),
       max_bytes: MAX_BYTES,
     });
   }),
@@ -174,15 +177,24 @@ publicRoutes.post(
 
     // The item has to belong to THIS request. Without the check, a valid token
     // plus somebody else's item id would file a document on another client.
-    let item: { id: string; label: string } | null = null;
+    let item: { id: string; label: string; formats: string[] | null } | null = null;
     if (itemId) {
-      item = await queryOne<{ id: string; label: string }>(
-        `SELECT id, label FROM document_request_items
+      item = await queryOne<{ id: string; label: string; formats: string[] | null }>(
+        `SELECT id, label, formats FROM document_request_items
           WHERE id = $1 AND document_request_id = $2`,
         [itemId, request.id],
       );
       if (!item) {
         res.status(422).json({ ok: false, error: 'That is not one of the documents requested here.' });
+        return;
+      }
+      // The formats the brokerage's checklist allows for this document, checked
+      // before anything is stored.
+      if (item.formats?.length && !fileMatchesFormats(file.originalname, item.formats)) {
+        res.status(422).json({
+          ok: false,
+          error: `${item.label} needs to be ${describeFormats(item.formats)}. Please choose a different file.`,
+        });
         return;
       }
     }
@@ -210,6 +222,12 @@ publicRoutes.post(
       );
       const id = rows[0]!.id;
       if (itemId) await markItemReceived(client, itemId);
+      await emitEvent({
+        organizationId: request.organization_id, type: 'document.uploaded', customerId: request.customer_id,
+        applicationId: request.application_id,
+        payload: { document_id: id, label: item?.label ?? file.originalname, source: 'request_link' },
+        dedupeKey: `document.uploaded:${id}`,
+      }, client);
 
       await client.query(
         `INSERT INTO activity (organization_id, application_id, customer_id, kind, actor_kind,
@@ -439,6 +457,7 @@ const UPLOAD_PAGE = `<!doctype html>
                 (item.required ? '' : ' <span style="color:var(--muted);font-weight:400">(optional)</span>') +
               '</div>' +
               (item.description ? '<div class="desc">' + esc(item.description) + '</div>' : '') +
+              (item.formats_label && !done ? '<div class="desc">Accepted: ' + esc(item.formats_label) + '</div>' : '') +
               (done ? '<div class="desc">Received</div>' : '') +
             '</div>' +
             (done ? '' :

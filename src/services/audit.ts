@@ -17,6 +17,7 @@ import type pg from 'pg';
 import { pool, query } from '../db/pool.ts';
 import { log } from '../lib/logger.ts';
 import { canonicalJson } from '../lib/canonical-json.ts';
+import { mirrorAudit } from './activity.ts';
 
 export type AuditActor = {
   userId?: string | null;
@@ -36,6 +37,12 @@ export type AuditEntry = {
   summary: string;
   before?: unknown;
   after?: unknown;
+  /**
+   * The client file this is about, when the entity is something on it (an
+   * appointment, a document). Not part of the hashed record — it only lets
+   * the activity log link to the file.
+   */
+  applicationId?: string | null;
 };
 
 /**
@@ -135,7 +142,11 @@ export async function recordAudit(
       prevHash, rowHash,
     ],
   );
-  return { id: String(rows[0]!.id), rowHash };
+  const id = String(rows[0]!.id);
+  // The 30-day activity view (services/activity.ts). Same transaction, but it
+  // cannot fail the action — it swallows its own errors.
+  await mirrorAudit(entry, id, client);
+  return { id, rowHash };
 }
 
 export type ChainVerification = {
