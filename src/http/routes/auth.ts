@@ -52,13 +52,34 @@ authRoutes.post(
     if (!result.ok) {
       // Failures are audited too. A burst of them against one account is the
       // signal, and it is invisible if only successes are recorded.
-      recordAuditSafely({
-        organizationId: '00000000-0000-0000-0000-000000000000',
-        actor: { kind: 'user', name: body.email, ip: req.ip },
-        action: 'auth.sign_in_failed',
-        entityType: 'user',
-        summary: `Failed sign-in for ${body.email} (${result.reason})`,
-      });
+      //
+      // The organization has to be a real one. This used to pass an all-zero
+      // UUID, which violates audit_log's foreign key — so every failed sign-in
+      // was dropped by recordAuditSafely's catch and logged as "audit write
+      // failed". The signal this block exists to capture was the one thing it
+      // never recorded.
+      //
+      // Resolved from the email where the account exists, so an attempt against
+      // a real account lands on that brokerage's log. Where it does not (a
+      // typo, or someone guessing addresses) it falls back to the single
+      // organization this deployment serves, because "somebody tried to sign in
+      // as a user who does not exist" is worth seeing too.
+      const failOrg = await queryOne<{ id: string }>(
+        `SELECT COALESCE(
+                  (SELECT organization_id FROM users WHERE lower(email) = lower($1) LIMIT 1),
+                  (SELECT id FROM organizations ORDER BY created_at LIMIT 1)
+                ) AS id`,
+        [body.email],
+      );
+      if (failOrg?.id) {
+        recordAuditSafely({
+          organizationId: failOrg.id,
+          actor: { kind: 'user', name: body.email, ip: req.ip },
+          action: 'auth.sign_in_failed',
+          entityType: 'user',
+          summary: `Failed sign-in for ${body.email} (${result.reason})`,
+        });
+      }
       res.status(result.reason === 'locked' ? 429 : 401).json({
         ok: false, code: result.reason, error: result.message,
         retryAfterMinutes: result.reason === 'locked' ? result.retryAfterMinutes : undefined,
