@@ -19,7 +19,7 @@ import { hashPassword } from '../src/services/auth.ts';
 import { addDays, addMonths, todayIn } from '../src/domain/dates.ts';
 import { toE164 } from '../src/lib/phone.ts';
 import { DEFAULT_AUTOMATIONS } from '../src/domain/default-automations.ts';
-import { validateDefinition } from '../src/domain/automation.ts';
+import { DefinitionSchema, validateDefinition } from '../src/domain/automation.ts';
 
 const TZ = 'America/Toronto';
 
@@ -224,7 +224,16 @@ const RETENTION: Array<[string, string, string, string, number, string]> = [
 async function seedAutomations(orgId: string): Promise<void> {
   let added = 0;
   for (const auto of DEFAULT_AUTOMATIONS) {
-    const issues = validateDefinition(auto.definition).filter((i) => i.level === 'error');
+    // Parse before validating OR storing. The defaults are written by hand with
+    // a single `trigger`; the schema's preprocess normalises that into the
+    // `triggers` array the engine iterates. Skipping this does two kinds of
+    // damage: validateDefinition reads definition.triggers and throws
+    // "not iterable", and — worse, because it is silent — the definition gets
+    // stored un-normalised, so every seeded automation would blow up in
+    // processEvents the first time it was enrolled.
+    const definition = DefinitionSchema.parse(auto.definition);
+
+    const issues = validateDefinition(definition).filter((i) => i.level === 'error');
     if (issues.length) {
       throw new Error(
         `Default automation "${auto.key}" would not publish: ${issues.map((i) => i.message).join('; ')}`,
@@ -240,7 +249,7 @@ async function seedAutomations(orgId: string): Promise<void> {
     // The purpose on the automation is the strongest purpose any step uses:
     // one marketing step makes the whole sequence marketing as far as the
     // consent gate is concerned, which is the safe direction to round.
-    const purposes = auto.definition.nodes
+    const purposes = definition.nodes
       .map((n) => ('purpose' in n ? n.purpose : undefined))
       .filter(Boolean) as string[];
     const purpose = purposes.includes('marketing')
@@ -258,7 +267,7 @@ async function seedAutomations(orgId: string): Promise<void> {
     await pool.query(
       `INSERT INTO automation_versions (automation_id, version, definition, notes)
        VALUES ($1, 1, $2, $3)`,
-      [automationId, JSON.stringify(auto.definition),
+      [automationId, JSON.stringify(definition),
        'Shipped default. Timings from docs/research/follow-up-and-content.md.'],
     );
     added++;

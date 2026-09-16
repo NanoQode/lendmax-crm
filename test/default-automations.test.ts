@@ -109,3 +109,25 @@ test('calculatorFor never throws and always returns a real calculator', () => {
     assert.ok(findCalculator(c.slug), `${key} produced an unknown calculator`);
   }
 });
+
+test('a hand-written default normalises to the triggers array the engine reads', () => {
+  // This is the shape of a bug that reached production: the defaults are
+  // written with one `trigger`, the engine iterates `definition.triggers`, and
+  // the schema's preprocess is what bridges the two. Anything that validates or
+  // stores a definition WITHOUT parsing it first gets an object with no
+  // `triggers` — validateDefinition throws "not iterable", and a stored copy
+  // fails later, silently, the first time an enrollment runs.
+  for (const auto of DEFAULT_AUTOMATIONS) {
+    const parsed = DefinitionSchema.parse(auto.definition);
+    assert.ok(
+      Array.isArray(parsed.triggers) && parsed.triggers.length >= 1,
+      `${auto.key} did not normalise to a triggers array`,
+    );
+    assert.equal(
+      parsed.triggers[0]!.type, parsed.trigger.type,
+      `${auto.key}: the singular and the array disagree`,
+    );
+    // validateDefinition must be given the PARSED definition, never the raw one.
+    assert.doesNotThrow(() => validateDefinition(parsed), `${auto.key} failed to validate`);
+  }
+});
