@@ -224,13 +224,16 @@ const RETENTION: Array<[string, string, string, string, number, string]> = [
 async function seedAutomations(orgId: string): Promise<void> {
   let added = 0;
   for (const auto of DEFAULT_AUTOMATIONS) {
-    // Parse before validating OR storing. The defaults are written by hand with
-    // a single `trigger`; the schema's preprocess normalises that into the
-    // `triggers` array the engine iterates. Skipping this does two kinds of
-    // damage: validateDefinition reads definition.triggers and throws
-    // "not iterable", and — worse, because it is silent — the definition gets
-    // stored un-normalised, so every seeded automation would blow up in
-    // processEvents the first time it was enrolled.
+    // Parse before validating. The defaults are written by hand with a single
+    // `trigger`; the schema's preprocess normalises that into the `triggers`
+    // array the engine iterates, and validateDefinition reads `triggers` — so
+    // handing it the raw object throws "not iterable" and fails the deploy.
+    //
+    // Storing the parsed form is tidiness rather than a fix: every reader runs
+    // the stored JSON back through DefinitionSchema.safeParse, so a raw
+    // definition normalises on load anyway. Writing the canonical shape means
+    // what is in the column matches what the engine works with, which is worth
+    // having when somebody is reading the table to work out what happened.
     const definition = DefinitionSchema.parse(auto.definition);
 
     const issues = validateDefinition(definition).filter((i) => i.level === 'error');
